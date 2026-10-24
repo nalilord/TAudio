@@ -58,8 +58,7 @@ type
     FStarted: Boolean;
     FDeviceId: string;
     FVolumeMode: TAudioVolumeMode;
-    function DoOpen(ARate, AChannels, ABits: Integer; AType: TAudioSampleType;
-      UseMixFormat: Boolean): Boolean;
+    function DoOpen(ARate, AChannels, ABits: Integer; AType: TAudioSampleType; UseMixFormat: Boolean): Boolean;
     procedure ApplyVolume;
     procedure CheckHR(HR: HResult; const Action: string);
     procedure AdoptWaveFormat(const Format: PWAVEFORMATEX);
@@ -237,14 +236,12 @@ begin
   DefaultDevice:=nil;
   DefaultId:='';
   try
-    CheckHRStatic(CoCreateInstance(CLSID_MMDeviceEnumerator, nil, CLSCTX_ALL,
-      IID_IMMDeviceEnumerator, Enumerator), 'CoCreateInstance(MMDeviceEnumerator)');
+    CheckHRStatic(CoCreateInstance(CLSID_MMDeviceEnumerator, nil, CLSCTX_ALL, IID_IMMDeviceEnumerator, Enumerator), 'CoCreateInstance(MMDeviceEnumerator)');
 
     if Succeeded(Enumerator.GetDefaultAudioEndpoint(eRender, eMultimedia, DefaultDevice)) then
       DefaultId:=GetDeviceIdString(DefaultDevice);
 
-    CheckHRStatic(Enumerator.EnumAudioEndpoints(eRender, DEVICE_STATEMASK_ALL, Collection),
-      'EnumAudioEndpoints');
+    CheckHRStatic(Enumerator.EnumAudioEndpoints(eRender, DEVICE_STATEMASK_ALL, Collection), 'EnumAudioEndpoints');
     CheckHRStatic(Collection.GetCount(Count), 'IMMDeviceCollection.GetCount');
 
     SetLength(Result, Count);
@@ -307,8 +304,7 @@ begin
   // A transient clock-query failure must freeze metering, not switch to a
   // different (submitted-frame) epoch and release queued peaks early.
   if Succeeded(FAudioClock.GetPosition(Position, QpcPosition)) then
-    FLastClockFrame:=Int64((Position DIV FClockFrequency) * UInt64(SampleRate) +
-      ((Position MOD FClockFrequency) * UInt64(SampleRate)) DIV FClockFrequency);
+    FLastClockFrame:=Int64((Position DIV FClockFrequency) * UInt64(SampleRate) + ((Position MOD FClockFrequency) * UInt64(SampleRate)) DIV FClockFrequency);
   PlayedFrame:=FLastClockFrame;
 end;
 
@@ -347,8 +343,7 @@ begin
   Result:=DoOpen(ARate, AChannels, Bits, AType, False);
 end;
 
-function TAudioOutputWASAPI.DoOpen(ARate, AChannels, ABits: Integer;
-  AType: TAudioSampleType; UseMixFormat: Boolean): Boolean;
+function TAudioOutputWASAPI.DoOpen(ARate, AChannels, ABits: Integer; AType: TAudioSampleType; UseMixFormat: Boolean): Boolean;
 var
   Format: TAudio.Windows.TWaveFormatEx;
   MixFormat: PWaveFormatEx;
@@ -362,8 +357,7 @@ begin
     FCoInitialized:=(CoResult = S_OK) OR (CoResult = S_FALSE);
     if NOT FCoInitialized AND (CoResult <> RPC_E_CHANGED_MODE) then
       CheckHR(CoResult, 'CoInitializeEx');
-    CheckHR(CoCreateInstance(CLSID_MMDeviceEnumerator, nil, CLSCTX_ALL,
-      IID_IMMDeviceEnumerator, FEnumerator), 'CoCreateInstance(MMDeviceEnumerator)');
+    CheckHR(CoCreateInstance(CLSID_MMDeviceEnumerator, nil, CLSCTX_ALL, IID_IMMDeviceEnumerator, FEnumerator), 'CoCreateInstance(MMDeviceEnumerator)');
     if FDeviceId <> '' then
       CheckHR(FEnumerator.GetDevice(PWideChar(WideString(FDeviceId)), FDevice), 'GetDevice')
     else
@@ -375,8 +369,7 @@ begin
     begin
       CheckHR(FAudioClient.GetMixFormat(MixFormat), 'GetMixFormat');
       AdoptWaveFormat(MixFormat);
-      CheckHR(FAudioClient.Initialize(AUDCLNT_SHAREMODE_SHARED, 0,
-        BUFFER_DURATION_HNS, 0, MixFormat, nil), 'Initialize');
+      CheckHR(FAudioClient.Initialize(AUDCLNT_SHAREMODE_SHARED, 0, BUFFER_DURATION_HNS, 0, MixFormat, nil), 'Initialize');
     end else
     begin
       SampleRate:=ARate;
@@ -393,8 +386,7 @@ begin
       Format.wBitsPerSample:=BitsPerSample;
       Format.nBlockAlign:=BytesPerFrame;
       Format.nAvgBytesPerSec:=SampleRate * BytesPerFrame;
-      CheckHR(FAudioClient.Initialize(AUDCLNT_SHAREMODE_SHARED, 0,
-        BUFFER_DURATION_HNS, 0, @Format, nil), 'Initialize');
+      CheckHR(FAudioClient.Initialize(AUDCLNT_SHAREMODE_SHARED, 0, BUFFER_DURATION_HNS, 0, @Format, nil), 'Initialize');
     end;
     CoTaskMemFree(MixFormat);
     MixFormat:=nil;
@@ -445,8 +437,7 @@ begin
   if NOT Assigned(FAudioClock) OR (FClockFrequency = 0) then
     Exit;
   if Succeeded(FAudioClock.GetPosition(Position, Qpc)) then
-    Result:=Int64((Position DIV FClockFrequency) * 1000000 +
-      ((Position MOD FClockFrequency) * 1000000) DIV FClockFrequency);
+    Result:=Int64((Position DIV FClockFrequency) * 1000000 + ((Position MOD FClockFrequency) * 1000000) DIV FClockFrequency);
 end;
 
 function TAudioOutputWASAPI.DeviceLatencyUs: Int64;
@@ -573,8 +564,7 @@ begin
       WriteFrames:=AvailableFrames;
 
     CheckHR(FRenderClient.GetBuffer(WriteFrames, DataBuffer), 'IAudioRenderClient.GetBuffer');
-    Move(Buffer[Integer(WrittenFrames) * BytesPerFrame], DataBuffer^,
-      Integer(WriteFrames) * BytesPerFrame);
+    Move(Buffer[Integer(WrittenFrames) * BytesPerFrame], DataBuffer^, Integer(WriteFrames) * BytesPerFrame);
     CheckHR(FRenderClient.ReleaseBuffer(WriteFrames, 0), 'IAudioRenderClient.ReleaseBuffer');
 
     Inc(FWriteEndFrame, WriteFrames);

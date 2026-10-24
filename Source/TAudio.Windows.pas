@@ -67,8 +67,7 @@ type
     function GetBufferSize(out pNumBufferFrames: UINT32): HResult; stdcall;
     function GetStreamLatency(out phnsLatency: Int64): HResult; stdcall;
     function GetCurrentPadding(out pNumPaddingFrames: UINT32): HResult; stdcall;
-    function IsFormatSupported(ShareMode: Integer; pFormat: PWaveFormatEx;
-      out ppClosestMatch: PWaveFormatEx): HResult; stdcall;
+    function IsFormatSupported(ShareMode: Integer; pFormat: PWaveFormatEx; out ppClosestMatch: PWaveFormatEx): HResult; stdcall;
     function GetMixFormat(out ppDeviceFormat: PWaveFormatEx): HResult; stdcall;
     function GetDevicePeriod(out phnsDefaultDevicePeriod: Int64; out phnsMinimumDevicePeriod: Int64): HResult; stdcall;
     function Start: HResult; stdcall;
@@ -149,8 +148,7 @@ const
   eMultimedia = ER_MULTIMEDIA;
   DEVICE_STATEMASK_ALL = $F;
 
-function AudioDeviceProperty(const Device: IMMDevice; const FmtId: string;
-  Pid: Cardinal): string;
+function AudioDeviceProperty(const Device: IMMDevice; const FmtId: string; Pid: Cardinal): string;
 function AudioDeviceStateText(State: Cardinal): string;
 
 implementation
@@ -162,11 +160,9 @@ uses
   System.SysUtils;
 {$ENDIF}
 
-function ClearAudioPropVariant(var Value: TAudioPropVariant): HResult; stdcall;
-  external 'ole32.dll' name 'PropVariantClear';
+function ClearAudioPropVariant(var Value: TAudioPropVariant): HResult; stdcall; external 'ole32.dll' name 'PropVariantClear';
 
-function AudioDeviceProperty(const Device: IMMDevice; const FmtId: string;
-  Pid: Cardinal): string;
+function AudioDeviceProperty(const Device: IMMDevice; const FmtId: string; Pid: Cardinal): string;
 var
   Store: IAudioPropertyStore;
   Key: TAudioPropertyKey;
@@ -179,8 +175,7 @@ begin
   Key.Pid:=Pid;
   FillChar(Value, SizeOf(Value), 0);
   try
-    if Succeeded(Store.GetValue(Key, Value)) AND (Value.Vt = 31) AND
-      (Value.Text <> nil) then
+    if Succeeded(Store.GetValue(Key, Value)) AND (Value.Vt = 31) AND (Value.Text <> nil) then
       Result:=Value.Text;
   finally
     ClearAudioPropVariant(Value);

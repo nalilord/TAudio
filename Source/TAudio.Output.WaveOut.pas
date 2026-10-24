@@ -303,9 +303,7 @@ begin
   WriteEndFrame:=FWrittenFrames;
   FillChar(Position, SizeOf(Position), 0);
   Position.wType:=TIME_SAMPLES;
-  Result:=(FHandle <> 0) AND
-    (waveOutGetPosition(FHandle, @Position, SizeOf(Position)) = MMSYSERR_NOERROR) AND
-    (Position.wType = TIME_SAMPLES);
+  Result:=(FHandle <> 0) AND (waveOutGetPosition(FHandle, @Position, SizeOf(Position)) = MMSYSERR_NOERROR) AND (Position.wType = TIME_SAMPLES);
   if NOT Result then
     Exit;
   if Position.sample < FLastPosition then

@@ -123,8 +123,7 @@ begin
       for Device IN Devices do
         if Device.IsDefault then
         begin
-          Check((Device.Id <> '') AND (Device.FriendlyName <> '') AND
-            (Device.State <> 0) AND (Device.StateText <> ''), 'Device properties');
+          Check((Device.Id <> '') AND (Device.FriendlyName <> '') AND (Device.State <> 0) AND (Device.StateText <> ''), 'Device properties');
           WASAPI.DeviceId:=Device.Id;
           FoundDefault:=True;
         end;

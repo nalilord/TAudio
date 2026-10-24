@@ -100,8 +100,7 @@ begin
 {$ELSE}
   Ticks:=TStopwatch.GetTimeStamp;
   Frequency:=TStopwatch.Frequency;
-  Result:=UInt64(Ticks DIV Frequency) * 1000 +
-    UInt64((Ticks MOD Frequency) * 1000 DIV Frequency);
+  Result:=UInt64(Ticks DIV Frequency) * 1000 + UInt64((Ticks MOD Frequency) * 1000 DIV Frequency);
 {$ENDIF}
 end;
 
@@ -130,8 +129,7 @@ begin
     astInt16: ExpectedBits:=16;
     else ExpectedBits:=32;
   end;
-  if (SampleRate <= 0) OR (Channels <= 0) OR (Channels > 32) OR
-    (BitsPerSample <> ExpectedBits) then
+  if (SampleRate <= 0) OR (Channels <= 0) OR (Channels > 32) OR (BitsPerSample <> ExpectedBits) then
     raise OutputErrorClass.Create('Invalid PCM format');
 end;
 
@@ -210,8 +208,7 @@ function TAudioOutputNull.Write(Buffer: PByte; ByteCount: Integer): Integer;
 var
   Delay: Cardinal;
 begin
-  if (Buffer = nil) OR (ByteCount <= 0) OR (SampleRate <= 0) OR
-    (BytesPerFrame <= 0) then
+  if (Buffer = nil) OR (ByteCount <= 0) OR (SampleRate <= 0) OR (BytesPerFrame <= 0) then
     Exit(0);
   Delay:=Cardinal((Int64(ByteCount) * 1000) DIV (SampleRate * BytesPerFrame));
   if WaitCancelled(Delay) then
