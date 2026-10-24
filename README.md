@@ -26,13 +26,13 @@ uses TAudio.Output, TAudio.Output.WASAPI;
 var
   Output: TAudioOutputWASAPI;
 begin
-  Output := TAudioOutputWASAPI.Create;
+  Output:=TAudioOutputWASAPI.Create;
   try
     Output.Open(48000, 2, 16);
     // Open negotiates the device mix format. Configure your PCM producer using
     // Output.SampleRate, Channels, BitsPerSample and SampleType before writing.
     Output.Start;
-    // Accepted := Output.Write(PCM, ByteCount);
+    // Accepted:=Output.Write(PCM, ByteCount);
     // Handle partial writes without resubmitting bytes already accepted.
     Output.WaitUntilDrained(2000);
   finally

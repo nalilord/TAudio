@@ -90,44 +90,48 @@ const
 implementation
 
 function AudioMonotonicMS: UInt64;
-{$IFNDEF FPC}var Ticks, Frequency: Int64;{$ENDIF}
+{$IFNDEF FPC}
+var
+  Ticks, Frequency: Int64;
+{$ENDIF}
 begin
 {$IFDEF FPC}
-  Result := GetTickCount64;
+  Result:=GetTickCount64;
 {$ELSE}
-  Ticks := TStopwatch.GetTimeStamp;
-  Frequency := TStopwatch.Frequency;
-  Result := UInt64(Ticks div Frequency) * 1000 +
-    UInt64((Ticks mod Frequency) * 1000 div Frequency);
+  Ticks:=TStopwatch.GetTimeStamp;
+  Frequency:=TStopwatch.Frequency;
+  Result:=UInt64(Ticks DIV Frequency) * 1000 +
+    UInt64((Ticks MOD Frequency) * 1000 DIV Frequency);
 {$ENDIF}
 end;
 
 function TAudioOutput.Cancelled: Boolean;
 begin
-  Result := Assigned(StopEvent) and (StopEvent.WaitFor(0) = wrSignaled);
+  Result:=Assigned(StopEvent) AND (StopEvent.WaitFor(0) = wrSignaled);
 end;
 
 function TAudioOutput.WaitCancelled(TimeoutMS: Cardinal): Boolean;
 begin
   if Assigned(StopEvent) then
-    Result := StopEvent.WaitFor(TimeoutMS) = wrSignaled
+    Result:=StopEvent.WaitFor(TimeoutMS) = wrSignaled
   else
   begin
     Sleep(TimeoutMS);
-    Result := False;
+    Result:=False;
   end;
 end;
 
 procedure TAudioOutput.ValidateFormat;
-var ExpectedBits: Integer;
+var
+  ExpectedBits: Integer;
 begin
   case SampleType of
-    astUInt8: ExpectedBits := 8;
-    astInt16: ExpectedBits := 16;
-  else ExpectedBits := 32;
+    astUInt8: ExpectedBits:=8;
+    astInt16: ExpectedBits:=16;
+    else ExpectedBits:=32;
   end;
-  if (SampleRate <= 0) or (Channels <= 0) or (Channels > 32) or
-     (BitsPerSample <> ExpectedBits) then
+  if (SampleRate <= 0) OR (Channels <= 0) OR (Channels > 32) OR
+    (BitsPerSample <> ExpectedBits) then
     raise OutputErrorClass.Create('Invalid PCM format');
 end;
 
@@ -142,40 +146,43 @@ begin
 end;
 
 function TAudioOutput.DevicePositionUs: Int64;
-var Played, Submitted: Int64;
+var
+  Played, Submitted: Int64;
 begin
-  Result := -1;
-  if (SampleRate > 0) and GetMeterPosition(Played, Submitted) then
-    Result := (Played * 1000000) div SampleRate;
+  Result:=-1;
+  if (SampleRate > 0) AND GetMeterPosition(Played, Submitted) then
+    Result:=(Played * 1000000) DIV SampleRate;
 end;
 
 function TAudioOutput.QueuedBytes64: Int64;
 begin
-  Result := GetBufferedBytes;
+  Result:=GetBufferedBytes;
 end;
 
 function TAudioOutput.DeviceLatencyUs: Int64;
 begin
-  Result := Int64(GetLatencyMS) * 1000;
+  Result:=Int64(GetLatencyMS) * 1000;
 end;
 
 function TAudioOutput.WaitUntilDrained(TimeoutMS: Cardinal): Boolean;
-var Started: UInt64;
+var
+  Started: UInt64;
 begin
-  Started := AudioMonotonicMS;
+  Started:=AudioMonotonicMS;
   while GetBufferedBytes > 0 do
   begin
-    if Cancelled or ((TimeoutMS > 0) and (AudioMonotonicMS - Started >= TimeoutMS)) then
+    if Cancelled OR ((TimeoutMS > 0) AND (AudioMonotonicMS - Started >= TimeoutMS)) then
       Exit(False);
     WaitCancelled(2);
   end;
-  Result := True;
+  Result:=True;
 end;
-
 
 function TAudioOutput.GetMeterPosition(out PlayedFrame, WriteEndFrame: Int64): Boolean;
 begin
-  PlayedFrame:=0; WriteEndFrame:=0; Result:=False;
+  PlayedFrame:=0;
+  WriteEndFrame:=0;
+  Result:=False;
 end;
 
 function TAudioOutputNull.Open(ARate, AChannels, ABits: Integer): Boolean;
@@ -203,10 +210,12 @@ function TAudioOutputNull.Write(Buffer: PByte; ByteCount: Integer): Integer;
 var
   Delay: Cardinal;
 begin
-  if (Buffer = nil) or (ByteCount <= 0) or (SampleRate <= 0) or
-     (BytesPerFrame <= 0) then Exit(0);
-  Delay:=Cardinal((Int64(ByteCount) * 1000) div (SampleRate * BytesPerFrame));
-  if WaitCancelled(Delay) then Exit(0);
+  if (Buffer = nil) OR (ByteCount <= 0) OR (SampleRate <= 0) OR
+    (BytesPerFrame <= 0) then
+    Exit(0);
+  Delay:=Cardinal((Int64(ByteCount) * 1000) DIV (SampleRate * BytesPerFrame));
+  if WaitCancelled(Delay) then
+    Exit(0);
   Result:=ByteCount;
 end;
 
@@ -223,41 +232,44 @@ end;
 constructor TAudioOutput.Create;
 begin
   inherited Create;
-  FOutputErrorClass := EAudioOutputError;
-  FBlockingWrites := True;
-  FSampleType := astInt16;
-  FVolume := 1.0;
+  FOutputErrorClass:=EAudioOutputError;
+  FBlockingWrites:=True;
+  FSampleType:=astInt16;
+  FVolume:=1.0;
 end;
 
 procedure TAudioOutput.SetOutputErrorClass(Value: TAudioOutputErrorClass);
 begin
-  if Value = nil then FOutputErrorClass := EAudioOutputError
-  else FOutputErrorClass := Value;
+  if Value = nil then
+    FOutputErrorClass:=EAudioOutputError
+  else
+    FOutputErrorClass:=Value;
 end;
 
 function TAudioOutput.BytesPerFrame: Integer;
 begin
-  Result := Channels * (BitsPerSample div 8);
+  Result:=Channels * (BitsPerSample DIV 8);
 end;
 
 function TAudioOutput.ClampVolume(const Value: Single): Single;
 begin
   if Value < 0 then
-    Result := 0
-  else if Value > 1 then
-    Result := 1
+    Result:=0
   else
-    Result := Value;
+  if Value > 1 then
+    Result:=1
+  else
+    Result:=Value;
 end;
 
 procedure TAudioOutput.SetMuted(const Value: Boolean);
 begin
-  FMuted := Value;
+  FMuted:=Value;
 end;
 
 procedure TAudioOutput.SetVolume(const Value: Single);
 begin
-  FVolume := ClampVolume(Value);
+  FVolume:=ClampVolume(Value);
 end;
 
 end.

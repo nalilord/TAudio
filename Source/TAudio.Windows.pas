@@ -2,8 +2,15 @@ unit TAudio.Windows;
 
 {$IFDEF FPC}{$MODE DELPHI}{$H+}{$ENDIF}
 {$ALIGN 8}
+
 interface
-uses {$IFDEF FPC}Windows, ActiveX;{$ELSE}Winapi.Windows, Winapi.ActiveX;{$ENDIF}
+
+uses
+{$IFDEF FPC}
+  Windows, ActiveX;
+{$ELSE}
+  Winapi.Windows, Winapi.ActiveX;
+{$ENDIF}
 
 const
   CLSID_MMDeviceEnumerator: TGUID = '{BCDE0395-E52F-467C-8E3D-C4579291692E}';
@@ -131,6 +138,7 @@ type
     function SetMute(Muted: BOOL; Context: PGUID): HResult; stdcall;
     function GetMute(out Muted: BOOL): HResult; stdcall;
   end;
+
 const
   IID_ISimpleAudioVolume: TGUID = '{87CE5498-68D6-44E5-9215-6DA47EF883D8}';
   IID_IAudioEndpointVolume: TGUID = '{5CDF2C82-841E-4546-9722-0CF74078229A}';
@@ -146,22 +154,34 @@ function AudioDeviceProperty(const Device: IMMDevice; const FmtId: string;
 function AudioDeviceStateText(State: Cardinal): string;
 
 implementation
-uses {$IFDEF FPC}SysUtils;{$ELSE}System.SysUtils;{$ENDIF}
+
+uses
+{$IFDEF FPC}
+  SysUtils;
+{$ELSE}
+  System.SysUtils;
+{$ENDIF}
+
 function ClearAudioPropVariant(var Value: TAudioPropVariant): HResult; stdcall;
   external 'ole32.dll' name 'PropVariantClear';
 
 function AudioDeviceProperty(const Device: IMMDevice; const FmtId: string;
   Pid: Cardinal): string;
-var Store: IAudioPropertyStore; Key: TAudioPropertyKey; Value: TAudioPropVariant;
+var
+  Store: IAudioPropertyStore;
+  Key: TAudioPropertyKey;
+  Value: TAudioPropVariant;
 begin
-  Result := '';
-  if Failed(Device.OpenPropertyStore(0, Store)) then Exit;
-  Key.FmtId := StringToGUID(FmtId);
-  Key.Pid := Pid;
+  Result:='';
+  if Failed(Device.OpenPropertyStore(0, Store)) then
+    Exit;
+  Key.FmtId:=StringToGUID(FmtId);
+  Key.Pid:=Pid;
   FillChar(Value, SizeOf(Value), 0);
   try
-    if Succeeded(Store.GetValue(Key, Value)) and (Value.Vt = 31) and
-       (Value.Text <> nil) then Result := Value.Text;
+    if Succeeded(Store.GetValue(Key, Value)) AND (Value.Vt = 31) AND
+      (Value.Text <> nil) then
+      Result:=Value.Text;
   finally
     ClearAudioPropVariant(Value);
   end;
@@ -170,11 +190,12 @@ end;
 function AudioDeviceStateText(State: Cardinal): string;
 begin
   case State of
-    1: Result := 'Active';
-    2: Result := 'Disabled';
-    4: Result := 'Not present';
-    8: Result := 'Unplugged';
-  else Result := 'Unknown';
+    1: Result:='Active';
+    2: Result:='Disabled';
+    4: Result:='Not present';
+    8: Result:='Unplugged';
+    else Result:='Unknown';
   end;
 end;
+
 end.
