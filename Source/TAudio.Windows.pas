@@ -18,8 +18,17 @@ const
   IID_IAudioClient: TGUID = '{1CB9AD4C-DBFA-4C32-B178-C2F568A703B2}';
   IID_IAudioRenderClient: TGUID = '{F294ACFC-3146-4483-A7BF-ADDCA7C260E2}';
   IID_IAudioClock: TGUID = '{CD63314F-3FBA-4A1B-812C-EF96358728E7}';
+  IID_IAudioCaptureClient: TGUID = '{C8ADBD64-E71E-48A0-A4DE-185C395CD317}';
 
   E_RENDER = 0;
+  E_CAPTURE = 1;
+  AUDCLNT_STREAMFLAGS_LOOPBACK = $00020000;
+  AUDCLNT_STREAMFLAGS_EVENTCALLBACK = $00040000;
+  AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY = $1;
+  AUDCLNT_BUFFERFLAGS_SILENT = $2;
+  AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR = $4;
+  AUDCLNT_E_DEVICE_INVALIDATED = HResult($88890004);
+  AUDCLNT_S_BUFFER_EMPTY = HResult($08890001);
   ER_MULTIMEDIA = 1;
   AUDCLNT_SHAREMODE_SHARED = 0;
   WAVE_FORMAT_PCM = 1;
@@ -81,6 +90,14 @@ type
     ['{F294ACFC-3146-4483-A7BF-ADDCA7C260E2}']
     function GetBuffer(NumFramesRequested: UINT32; out ppData: PByte): HResult; stdcall;
     function ReleaseBuffer(NumFramesWritten: UINT32; dwFlags: DWORD): HResult; stdcall;
+  end;
+
+  IAudioCaptureClient = interface(IUnknown)
+    ['{C8ADBD64-E71E-48A0-A4DE-185C395CD317}']
+    function GetBuffer(out ppData: PByte; out pNumFramesToRead: UINT32; out pdwFlags: DWORD; pu64DevicePosition: PUInt64;
+      pu64QPCPosition: PUInt64): HResult; stdcall;
+    function ReleaseBuffer(NumFramesRead: UINT32): HResult; stdcall;
+    function GetNextPacketSize(out pNumFramesInNextPacket: UINT32): HResult; stdcall;
   end;
 
   IAudioClock = interface(IUnknown)
@@ -145,6 +162,7 @@ const
   KSDATAFORMAT_SUBTYPE_IEEE_FLOAT: TGUID = '{00000003-0000-0010-8000-00AA00389B71}';
   WAVE_FORMAT_EXTENSIBLE = $FFFE;
   eRender = E_RENDER;
+  eCapture = E_CAPTURE;
   eMultimedia = ER_MULTIMEDIA;
   DEVICE_STATEMASK_ALL = $F;
 

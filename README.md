@@ -17,6 +17,36 @@ source library; it does not require a component package or a particular UI toolk
 | `TAudio.Output.WaveOut` | Default/explicit device selection, PCM U8/S16/S32/F32, owned buffers and hardware position |
 | `TAudio.Output.WASAPI` | Shared-mode rendering, device enumeration, mix/explicit PCM formats, volume and hardware clocks |
 | `TAudio.Windows` | Minimal native COM declarations and device-property access |
+| `TAudio.Clock` | High-resolution monotonic microseconds (QPC on Windows), the WASAPI timestamp timebase |
+| `TAudio.Input` | Capture contract: packets with device position and capture time, delivered on a capture thread |
+| `TAudio.Input.WASAPI` | Shared-mode capture of capture endpoints and loopback of render endpoints, QPC timestamps |
+| `TAudio.Resample` | Variable-ratio Float32 resampler (Kaiser-windowed sinc, 32 taps, 1024 phases) |
+| `TAudio.ClockSync` | Locks a capture device clock to the reference clock: drift fit, bounded-ratio resampling, counted resyncs |
+
+## Capturing and clock drift
+
+```pascal
+uses TAudio.Input, TAudio.Input.WASAPI, TAudio.ClockSync;
+
+// Input:=TAudioInputWASAPI.Create;   DeviceId:='' = default capture endpoint,
+// Input.Loopback:=True captures what a render endpoint plays.
+// Input.OnData:=HandleData;          called on the capture thread
+// Input.Open; Input.Start;
+//
+// procedure TForm1.HandleData(Sender: TObject; const Packet: TAudioInputPacket);
+//   convert Packet.Data to Float32, then
+//   Sync.Push(Floats, Packet.Frames, Packet.CaptureTimeUs, Output, 0, NOT Packet.TimestampError);
+```
+
+Every device crystal runs slightly off its nominal rate (this test rig: a Realtek
+codec at -0.8 ppm, a Sound BlasterX AE-5 at -23.6 ppm, AMD HDMI audio at +5.2 ppm
+against QPC). `TAudioClockSync` measures that against the packets' QPC capture
+times and resamples so output frame k belongs to reference time
+`OriginUs + k / NominalRate`. Corrections stay within `MaxCorrectionPpm`; only
+stalls and glitches beyond `ResyncThresholdMs` drop or insert samples, and they
+are counted. `Examples/CaptureDrift` measures any set of endpoints at once;
+`Tests/AudioClockSyncSmoke` checks the controller against a simulated device
+(steady and wandering drift up to 8 h, stalls, timestamp glitches, tone quality).
 
 ## Opening and writing
 
