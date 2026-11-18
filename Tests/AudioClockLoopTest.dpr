@@ -57,6 +57,7 @@ type
     function SampleAt(Index: Int64): Double;
   public
     Clicks: TArray<Double>;   // onset times, in the stream's sample index (fractional)
+    Peak: Double;             // largest absolute sample seen, for level diagnostics
     constructor Create(Rate: Integer);
     procedure Append(Data: PSingle; Frames: Integer);
   end;
@@ -85,6 +86,7 @@ type
   public
     Output: TAudioOutputWASAPI;
     Template: TArray<Single>;
+    Accepted, Offered: Int64;
     procedure Execute; override;
   end;
 
@@ -119,6 +121,9 @@ begin
   N:=Length(FHistory);
   SetLength(FHistory, N + Frames);
   Move(Data^, FHistory[N], Frames * SizeOf(Single));
+  for I:=0 to Frames - 1 do
+    if Abs(Data[I]) > Peak then
+      Peak:=Abs(Data[I]);
   for I:=0 to Frames - 1 do
     if (FPendingTrigger < 0) AND (Abs(Data[I]) > TriggerLevel) AND (FCount + I - FLastClick > FRate * IntervalMs DIV 2000) then
       FPendingTrigger:=FCount + I;
@@ -322,7 +327,8 @@ begin
         else
           PSmallInt(@Buf[(I * Ch + C) * 2])^:=Round(V * 32767);
     end;
-    Output.Write(@Buf[0], Length(Buf));
+    Inc(Accepted, Output.Write(@Buf[0], Length(Buf)));
+    Inc(Offered, Length(Buf));
     Inc(Sample, Chunk);
   end;
 end;
@@ -507,6 +513,10 @@ begin
         'uncorrected it would have drifted %.1f us; A %.3f ppm (%d resyncs, %d disc), B %.3f ppm (%d resyncs, %d disc): %s',
         [Seconds, Paired, Expected, BaseSynced, MaxDev, FrameUs, RawDrift, SA.DriftPpm, SA.Resyncs, A.Discontinuities, SB.DriftPpm,
         SB.Resyncs, B.Discontinuities, BoolToStr(Ok, True)]));
+      Writeln(Format('RENDERED %d of %d bytes, device position %.2f s, sample type %d', [Render.Accepted, Render.Offered,
+        Output.DevicePositionUs / 1E6, Ord(Output.SampleType)]));
+      Writeln(Format('LEVELS A: %d clicks, peak %.4f; B: %d clicks, peak %.4f (trigger %.3f)', [Length(A.SyncedDetector.Clicks),
+        A.SyncedDetector.Peak, Length(B.SyncedDetector.Clicks), B.SyncedDetector.Peak, TriggerLevel]));
       if CsvFile <> '' then
         Csv.SaveToFile(CsvFile);
       if NOT Ok then
