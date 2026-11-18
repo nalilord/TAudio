@@ -47,6 +47,10 @@ stalls and glitches beyond `ResyncThresholdMs` drop or insert samples, and they
 are counted. `Examples/CaptureDrift` measures any set of endpoints at once;
 `Tests/AudioClockSyncSmoke` checks the controller against a simulated device
 (steady and wandering drift up to 8 h, stalls, timestamp glitches, tone quality).
+`Tests/AudioClockLoopTest` is the long-run hardware check: device A plays a click
+every second, a cable feeds it into device B, and the clock-synced arrival times
+in A's loopback and B's capture must keep a constant offset (the analog delay)
+while the uncorrected offset drifts by the devices' ppm difference.
 
 ## Opening and writing
 
