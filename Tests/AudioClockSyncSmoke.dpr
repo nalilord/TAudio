@@ -52,6 +52,10 @@ type
     JitterUs: Double;
     StallAtS, StallMs: Double;
     GlitchAtS, GlitchMs: Double;
+    // Timestamps from a frame clock: they lag the true capture time by an amount that
+    // grows at SawPpm and snaps back by SawStepUs once it reaches it (seen on a
+    // Sound Blaster G3: 12.6 ppm, 1 ms USB frames).
+    SawPpm, SawStepUs: Double;
     MaxCorrectionPpm: Double;
     Dsp: Boolean;
   end;
@@ -103,6 +107,7 @@ var
   Started: TDateTime;
   OutK: Int64;
   LostFrames: Int64;
+  Saw: Double;
 begin
   Result:=Default(TResult);
   Started:=Now;
@@ -132,6 +137,11 @@ begin
           Input[I]:=0.5 * Sin(2 * Pi * 997 * (TTrue + I * 1E6 / Rate) / 1E6);
       Stalled:=(S.StallAtS >= 0) AND (TTrue >= S.StallAtS * 1E6) AND (TTrue < S.StallAtS * 1E6 + S.StallMs * 1000);
       Reported:=T0Us + TTrue + (Rand01 * 2 - 1) * S.JitterUs;
+      if S.SawStepUs > 0 then
+      begin
+        Saw:=TTrue * S.SawPpm * 1E-6;
+        Reported:=Reported - (Saw - S.SawStepUs * Floor(Saw / S.SawStepUs));
+      end;
       Valid:=True;
       if (S.GlitchAtS >= 0) AND (P = Round(S.GlitchAtS * Fs / PacketFrames)) then
       begin
@@ -287,6 +297,21 @@ begin
     R:=Run(S);
     Check((R.Stats.Resyncs = 0) AND (R.MaxAbsErrorUs < 1000), Format('%s: ignored (resyncs %d, max %.1f us)',
       [S.Name, R.Stats.Resyncs, R.MaxAbsErrorUs]));
+
+    // Frame-quantised timestamps (G3 on Creative's driver): the true rate shows only in 1 ms
+    // catch-up steps every ~80 s; a short fit window that misses them under-corrects.
+    S:=Scenario('frame-clock sawtooth', 2 * 3600, 14.4);
+    if Quick then
+      S.Seconds:=1800;
+    S.JitterUs:=50;
+    S.SawPpm:=12.6;
+    S.SawStepUs:=1000;
+    R:=Run(S);
+    // The 30 s fit reads ~0 ppm between steps and ~+45 ppm across one; only the bound matters.
+    Check(Abs(R.FinalDriftPpm - 14.4) < 40, Format('%s: rate estimate within the sawtooth swing (%.2f ppm, true 14.4)', [S.Name,
+      R.FinalDriftPpm]));
+    Check((R.MaxAbsErrorUs < 1500) AND (R.Stats.Resyncs = 0),
+      Format('%s: bounded by the sawtooth, no residual drift (max %.1f us, final %.1f us)', [S.Name, R.MaxAbsErrorUs, R.FinalErrorUs]));
 
     // Out of range: a device 5000 ppm fast with corrections capped at 2000 ppm cannot be
     // followed smoothly; the error must stay bounded by counted resyncs.

@@ -34,6 +34,7 @@ type
     Discontinuities, TimestampErrors, Silent: Int64;
     FirstDevicePosition: Int64;
     Errors: string;
+    Dump: TStringList;
     constructor Create;
     destructor Destroy; override;
     procedure HandleData(Sender: TObject; const Packet: TAudioInputPacket);
@@ -49,6 +50,7 @@ end;
 destructor TDevice.Destroy;
 begin
   Input.Free;
+  Dump.Free;
   Sync.Free;
   Lock.Free;
   inherited;
@@ -69,6 +71,9 @@ begin
   if Sync = nil then
     Sync:=TAudioClockSync.Create(Input.Channels, Input.SampleRate);
   Sync.Push(@Floats[0], Packet.Frames, Packet.CaptureTimeUs, Output, 0, NOT Packet.TimestampError);
+  if Dump <> nil then
+    Dump.Add(Format('%d,%d,%d,%d,%d,%d', [Packet.DevicePosition, Packet.CaptureTimeUs, Packet.Frames, Ord(Packet.Discontinuity),
+      Ord(Packet.TimestampError), Ord(Packet.Silent)]));
   Lock.Acquire;
   try
     Stats:=Sync.Stats;
@@ -137,6 +142,8 @@ var
   S: TAudioClockSyncStats;
   Disc, TsErr, Sil: Int64;
   Err: string;
+  DumpBase: string;
+  FirstDevice: Integer;
 begin
   try
     if (ParamCount >= 1) AND (ParamStr(1) = '--list') then
@@ -150,9 +157,17 @@ begin
       Halt(2);
     end;
     Seconds:=StrToInt(ParamStr(1));
+    DumpBase:='';
+    FirstDevice:=2;
+    if (ParamCount >= 3) AND (ParamStr(2) = '--dump') then
+    begin
+      // CaptureDrift <seconds> --dump <file-prefix> <device> ...: per-packet CSV per device.
+      DumpBase:=ParamStr(3);
+      FirstDevice:=4;
+    end;
     Devices:=TList.Create;
     try
-      for I:=2 to ParamCount do
+      for I:=FirstDevice to ParamCount do
       begin
         if NOT FindDevice(ParamStr(I), Loopback, Info) then
           raise Exception.Create('No active endpoint matches "' + ParamStr(I) + '"');
@@ -162,6 +177,11 @@ begin
         if Loopback then
           Device.Name:='loopback ' + Device.Name;
         Device.Input:=TAudioInputWASAPI.Create;
+        if DumpBase <> '' then
+        begin
+          Device.Dump:=TStringList.Create;
+          Device.Dump.Add('device_position,capture_us,frames,discontinuity,timestamp_error,silent');
+        end;
         Device.Input.DeviceId:=Info.Id;
         Device.Input.Loopback:=Loopback;
         Device.Input.OnData:=Device.HandleData;
@@ -203,6 +223,8 @@ begin
       begin
         Device:=TDevice(Devices[I]);
         Device.Input.Stop;
+        if Device.Dump <> nil then
+          Device.Dump.SaveToFile(Format('%s-%d.csv', [DumpBase, I]));
         S:=Device.Stats;
         Disc:=Device.Discontinuities;
         TsErr:=Device.TimestampErrors;

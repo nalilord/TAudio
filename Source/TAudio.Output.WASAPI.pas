@@ -74,6 +74,9 @@ type
     procedure Flush; override;
     function DevicePositionUs: Int64; override;
     function DeviceLatencyUs: Int64; override;
+    // The stream frame playing at the device now, with the QPC time of that reading
+    // (TAudio.Clock.AudioMonotonicUs timebase). False without a device clock.
+    function DevicePositionQpc(out PositionFrames: Int64; out QpcUs: Int64): Boolean;
     property ApplyVolumeOnOpen: Boolean read FApplyVolumeOnOpen write FApplyVolumeOnOpen;
     property RequireClock: Boolean read FRequireClock write FRequireClock;
     procedure Close; override;
@@ -438,6 +441,21 @@ begin
     Exit;
   if Succeeded(FAudioClock.GetPosition(Position, Qpc)) then
     Result:=Int64((Position DIV FClockFrequency) * 1000000 + ((Position MOD FClockFrequency) * 1000000) DIV FClockFrequency);
+end;
+
+function TAudioOutputWASAPI.DevicePositionQpc(out PositionFrames: Int64; out QpcUs: Int64): Boolean;
+var
+  Position, Qpc: UInt64;
+begin
+  PositionFrames:=0;
+  QpcUs:=0;
+  Result:=Assigned(FAudioClock) AND (FClockFrequency > 0) AND Succeeded(FAudioClock.GetPosition(Position, Qpc));
+  if NOT Result then
+    Exit;
+  PositionFrames:=Int64((Position DIV FClockFrequency) * UInt64(SampleRate) + ((Position MOD FClockFrequency) * UInt64(SampleRate)) DIV
+    FClockFrequency);
+  // WASAPI reports the QPC position in 100 ns units.
+  QpcUs:=Int64(Qpc DIV 10);
 end;
 
 function TAudioOutputWASAPI.DeviceLatencyUs: Int64;

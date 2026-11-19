@@ -7,24 +7,26 @@ program AudioClockLoopTest;
 {
   Long-run acoustic loop test for TAudioClockSync (PasAV HardwareEncodePlan E07.3).
 
-  Device A plays a click every IntervalMs at exact positions on A's sample clock.
-  A cable carries A's output into device B's input. Two captures run at once:
-    A: loopback of A's render endpoint (A's clock)
-    B: B's capture endpoint (B's clock)
-  Each is locked to the QPC clock with TAudioClockSync, and every click's arrival
-  time is measured in both by cross-correlation with the click template.
+  Device A plays a click every IntervalMs at exact frames of its render stream. A
+  cable carries A's output into device B's input.
 
-  The synced difference tB - tA is the analog path delay: it must stay constant.
-  The same difference computed from raw device sample counts (no clock sync) is
-  logged beside it and drifts by the devices' ppm difference.
+    A: the render device clock. IAudioClock.GetPosition reports which stream
+       frame is playing and when (QPC); each click's play time is interpolated
+       from those readings. No loopback: driver effects and other sounds on A's
+       mix cannot produce false clicks.
+    B: B's capture endpoint, locked to QPC with TAudioClockSync; each click's
+       arrival is timed by cross-correlation with the click template.
+
+  B - A is the analog path delay and must stay constant. The same difference
+  with both devices taken at their nominal rate (no clock correction) is logged
+  beside it and drifts by the devices' ppm difference.
 
     AudioClockLoopTest --list
     AudioClockLoopTest <seconds> <render A> <capture B> [csv-file]
 
-  Devices are name substrings. Exit 1 if the synced difference moves by more than
-  one video frame (16.7 ms), any device resyncs, or clicks go missing.
-  With "--same <render A>" instead of a capture device, B is a second loopback of
-  A (no cable needed): a self-check of the measurement chain.
+  The CSV holds one row per minute; <csv-file>-clicks.csv one row per click.
+  Exit 1 if B - A moves by more than one video frame (16.7 ms) after the first
+  minute, B resyncs, or clicks go missing.
 }
 
 uses
@@ -39,16 +41,10 @@ const
   FrameUs = 16667;
 
 type
-  TClick = record
-    SyncedUs: Double;
-    RawUs: Double;
-  end;
-
-  // Finds click onsets in a mono stream with known per-sample times.
+  // Finds click onsets in a mono stream.
   TDetector = class
   private
     FRate: Integer;
-    FTemplate: TArray<Double>;
     FHistory: TArray<Single>;
     FHistoryStart: Int64;     // sample index of FHistory[0]
     FCount: Int64;            // samples appended so far
@@ -56,15 +52,15 @@ type
     FLastClick: Int64;
     function SampleAt(Index: Int64): Double;
   public
-    Clicks: TArray<Double>;   // onset times, in the stream's sample index (fractional)
-    Peak: Double;             // largest absolute sample seen, for level diagnostics
+    Template: TArray<Double>;
+    Clicks: TArray<Double>;   // onsets, fractional sample index in the stream
+    Peak: Double;
     constructor Create(Rate: Integer);
     procedure Append(Data: PSingle; Frames: Integer);
   end;
 
-  TTrack = class
+  TCapture = class
   public
-    Name: string;
     Input: TAudioInputWASAPI;
     Sync: TAudioClockSync;
     Lock: TCriticalSection;
@@ -78,16 +74,26 @@ type
     destructor Destroy; override;
     procedure HandleData(Sender: TObject; const Packet: TAudioInputPacket);
     procedure HandleError(Sender: TObject; const Message: string);
-    function ClickTimes: TArray<TClick>;
     function Stats: TAudioClockSyncStats;
   end;
 
+  // Plays the click train and turns device position readings into click play times.
   TRenderThread = class(TThread)
   public
     Output: TAudioOutputWASAPI;
-    Template: TArray<Single>;
+    Template: TArray<Double>;
+    Lock: TCriticalSection;
+    ClickUs: TArray<Double>;   // QPC play time of click k
     Accepted, Offered: Int64;
+    FirstPos, LastPos: Int64;
+    FirstQpc, LastQpc: Int64;
+    Readings: Int64;
     procedure Execute; override;
+  end;
+
+  TPair = record
+    K: Integer;
+    AUs, ANominalUs, BSyncedUs, BRawUs: Double;
   end;
 
 { TDetector }
@@ -98,9 +104,9 @@ var
 begin
   FRate:=Rate;
   N:=Rate * BurstMs DIV 1000;
-  SetLength(FTemplate, N);
+  SetLength(Template, N);
   for I:=0 to N - 1 do
-    FTemplate[I]:=Sin(2 * Pi * BurstHz * I / Rate) * 0.5 * (1 - Cos(2 * Pi * I / (N - 1)));
+    Template[I]:=Sin(2 * Pi * BurstHz * I / Rate) * 0.5 * (1 - Cos(2 * Pi * I / (N - 1)));
   FPendingTrigger:=-1;
   FLastClick:=-Int64(Rate) * 10;
 end;
@@ -112,25 +118,25 @@ end;
 
 procedure TDetector.Append(Data: PSingle; Frames: Integer);
 var
-  I, Lag, BestLag, N, Keep, Drop: Integer;
+  I, Lag, BestLag, N, Keep, Drop, K: Integer;
   WindowStart: Int64;
   C, Best, Prev, Next, Denom, Offset: Double;
-  K: Integer;
   Corr: array of Double;
 begin
   N:=Length(FHistory);
   SetLength(FHistory, N + Frames);
   Move(Data^, FHistory[N], Frames * SizeOf(Single));
   for I:=0 to Frames - 1 do
+  begin
     if Abs(Data[I]) > Peak then
       Peak:=Abs(Data[I]);
-  for I:=0 to Frames - 1 do
     if (FPendingTrigger < 0) AND (Abs(Data[I]) > TriggerLevel) AND (FCount + I - FLastClick > FRate * IntervalMs DIV 2000) then
       FPendingTrigger:=FCount + I;
+  end;
   Inc(FCount, Frames);
 
   // Correlate once the window [trigger - 3 ms, trigger + 3 ms + template] is complete.
-  if (FPendingTrigger >= 0) AND (FCount >= FPendingTrigger + FRate * 3 DIV 1000 + Length(FTemplate) + 2) then
+  if (FPendingTrigger >= 0) AND (FCount >= FPendingTrigger + FRate * 3 DIV 1000 + Length(Template) + 2) then
   begin
     WindowStart:=Max(FHistoryStart, FPendingTrigger - FRate * 3 DIV 1000);
     SetLength(Corr, FRate * 6 DIV 1000);
@@ -139,8 +145,8 @@ begin
     for Lag:=0 to High(Corr) do
     begin
       C:=0;
-      for K:=0 to High(FTemplate) do
-        C:=C + FTemplate[K] * SampleAt(WindowStart + Lag + K);
+      for K:=0 to High(Template) do
+        C:=C + Template[K] * SampleAt(WindowStart + Lag + K);
       // Analog paths may invert polarity.
       Corr[Lag]:=Abs(C);
       if Corr[Lag] > Best then
@@ -175,16 +181,16 @@ begin
   end;
 end;
 
-{ TTrack }
+{ TCapture }
 
-constructor TTrack.Create;
+constructor TCapture.Create;
 begin
   Lock:=TCriticalSection.Create;
   FirstCaptureUs:=-1;
   SyncedFirstIndex:=-1;
 end;
 
-destructor TTrack.Destroy;
+destructor TCapture.Destroy;
 begin
   Input.Free;
   Sync.Free;
@@ -194,7 +200,7 @@ begin
   inherited;
 end;
 
-procedure TTrack.HandleData(Sender: TObject; const Packet: TAudioInputPacket);
+procedure TCapture.HandleData(Sender: TObject; const Packet: TAudioInputPacket);
 var
   I, C, N, Ch, Produced: Integer;
 begin
@@ -219,7 +225,7 @@ begin
     end;
     if FirstCaptureUs < 0 then
       FirstCaptureUs:=Packet.CaptureTimeUs;
-    // Raw path: device frame count at the nominal rate, as an uncorrected pipeline would stamp it.
+    // Raw path: device frames at the nominal rate, as an uncorrected pipeline would stamp them.
     if Length(Mono) < N then
       SetLength(Mono, N);
     for I:=0 to N - 1 do
@@ -229,7 +235,6 @@ begin
         Mono[I]:=Mono[I] + Floats[I * Ch + C];
     end;
     RawDetector.Append(@Mono[0], N);
-    // Synced path.
     Produced:=Sync.Push(@Floats[0], N, Packet.CaptureTimeUs, Output, 0, NOT Packet.TimestampError);
     if (Produced > 0) AND (SyncedFirstIndex < 0) then
       SyncedFirstIndex:=Sync.NextOutputFrame - Produced;
@@ -250,7 +255,7 @@ begin
   end;
 end;
 
-procedure TTrack.HandleError(Sender: TObject; const Message: string);
+procedure TCapture.HandleError(Sender: TObject; const Message: string);
 begin
   Lock.Acquire;
   try
@@ -260,31 +265,7 @@ begin
   end;
 end;
 
-function TTrack.ClickTimes: TArray<TClick>;
-var
-  I, N: Integer;
-  Rate: Double;
-begin
-  Lock.Acquire;
-  try
-    Result:=nil;
-    if Sync = nil then
-      Exit;
-    Rate:=Input.SampleRate;
-    N:=Min(Length(SyncedDetector.Clicks), Length(RawDetector.Clicks));
-    SetLength(Result, N);
-    for I:=0 to N - 1 do
-    begin
-      // Synced output sample k belongs to QPC time OriginUs + k / rate exactly.
-      Result[I].SyncedUs:=Sync.OriginUs + (SyncedFirstIndex + SyncedDetector.Clicks[I]) * 1E6 / Rate;
-      Result[I].RawUs:=FirstCaptureUs + RawDetector.Clicks[I] * 1E6 / Rate;
-    end;
-  finally
-    Lock.Release;
-  end;
-end;
-
-function TTrack.Stats: TAudioClockSyncStats;
+function TCapture.Stats: TAudioClockSyncStats;
 begin
   Lock.Acquire;
   try
@@ -301,17 +282,20 @@ end;
 
 procedure TRenderThread.Execute;
 var
-  Chunk, Ch, I, C, Bpf, Period, Pos: Integer;
+  Chunk, Ch, I, C, Period, Pos: Integer;
   Buf: TBytes;
   V: Double;
-  Sample: Int64;
+  Sample, DevPos, PrevPos, ClickFrame: Int64;
+  Qpc, PrevQpc: Int64;
 begin
   Ch:=Output.Channels;
-  Bpf:=Output.BytesPerFrame;
   Chunk:=Output.SampleRate DIV 100;
   Period:=Output.SampleRate * IntervalMs DIV 1000;
-  SetLength(Buf, Chunk * Bpf);
+  SetLength(Buf, Chunk * Output.BytesPerFrame);
   Sample:=0;
+  PrevPos:=-1;
+  PrevQpc:=0;
+  FirstPos:=-1;
   while NOT Terminated do
   begin
     for I:=0 to Chunk - 1 do
@@ -330,6 +314,44 @@ begin
     Inc(Accepted, Output.Write(@Buf[0], Length(Buf)));
     Inc(Offered, Length(Buf));
     Inc(Sample, Chunk);
+
+    // Click k starts at stream frame k * Period; find its play time between two readings.
+    if Output.DevicePositionQpc(DevPos, Qpc) AND (DevPos > 0) then
+    begin
+      Inc(Readings);
+      if FirstPos < 0 then
+      begin
+        FirstPos:=DevPos;
+        FirstQpc:=Qpc;
+      end;
+      LastPos:=DevPos;
+      LastQpc:=Qpc;
+      if (PrevPos >= 0) AND (DevPos > PrevPos) then
+      begin
+        Lock.Acquire;
+        try
+          ClickFrame:=Int64(Length(ClickUs)) * Period;
+          while ClickFrame <= DevPos do
+          begin
+            if ClickFrame >= PrevPos then
+            begin
+              SetLength(ClickUs, Length(ClickUs) + 1);
+              ClickUs[High(ClickUs)]:=PrevQpc + (ClickFrame - PrevPos) * (Qpc - PrevQpc) / (DevPos - PrevPos);
+            end else
+            begin
+              // Played before the first usable reading: mark unknown.
+              SetLength(ClickUs, Length(ClickUs) + 1);
+              ClickUs[High(ClickUs)]:=-1;
+            end;
+            ClickFrame:=Int64(Length(ClickUs)) * Period;
+          end;
+        finally
+          Lock.Release;
+        end;
+      end;
+      PrevPos:=DevPos;
+      PrevQpc:=Qpc;
+    end;
   end;
 end;
 
@@ -360,67 +382,136 @@ begin
       Writeln('  ', D.FriendlyName);
 end;
 
-function OpenTrack(const AName: string; const Info: TAudioDeviceInfo; Loopback: Boolean): TTrack;
-begin
-  Result:=TTrack.Create;
-  Result.Name:=AName;
-  Result.Input:=TAudioInputWASAPI.Create;
-  Result.Input.DeviceId:=Info.Id;
-  Result.Input.Loopback:=Loopback;
-  // A real stream plays on A; no silent keep-alive needed.
-  Result.Input.KeepLoopbackAlive:=False;
-  Result.Input.OnData:=Result.HandleData;
-  Result.Input.OnError:=Result.HandleError;
-  Result.Input.Open;
-  Writeln(Format('OPEN %s: %s, %d Hz, %d ch', [AName, Info.FriendlyName, Result.Input.SampleRate, Result.Input.Channels]));
-end;
-
 var
-  Seconds, I, J, Paired, Expected: Integer;
+  Seconds, Expected: Integer;
   RenderInfo, CaptureInfo: TAudioDeviceInfo;
   Output: TAudioOutputWASAPI;
   Render: TRenderThread;
-  A, B: TTrack;
+  B: TCapture;
   StartUs, NextLog: Int64;
-  CA, CB: TArray<TClick>;
-  Synced, Raw, BaseSynced, BaseRaw, MaxDev, Dev, RawDrift: Double;
-  HaveBase: Boolean;
-  Csv: TStringList;
+  Pairs: TArray<TPair>;
+  Latency, BaseSynced, BaseRaw, MaxDev, LastSynced, LastRawDrift, APpm: Double;
+  Csv, ClickLog: TStringList;
   CsvFile: string;
-  SA, SB: TAudioClockSyncStats;
-  SameDevice: Boolean;
-  Detector: TDetector;
+  SB: TAudioClockSyncStats;
   Ok: Boolean;
 
+// Pairs every click k (A play time) with B's synced detection near A + latency, and with
+// B's raw detection of the same onset.
 procedure Measure;
 var
-  I, J: Integer;
+  A: TArray<Double>;
+  BS, BR: TArray<Double>;
+  Rate, Want, BSyncedUs, BRawUs, SyncedDiff, RawDiff, Tmp: Double;
+  I, J, R, K: Integer;
+  Lat: TArray<Double>;
+  Origin: Int64;
+  FirstSynced: Int64;
 begin
-  CA:=A.ClickTimes;
-  CB:=B.ClickTimes;
-  Paired:=0;
-  J:=0;
-  for I:=0 to High(CA) do
-  begin
-    while (J <= High(CB)) AND (CB[J].SyncedUs < CA[I].SyncedUs - IntervalMs * 500) do
-      Inc(J);
-    if (J > High(CB)) OR (Abs(CB[J].SyncedUs - CA[I].SyncedUs) > IntervalMs * 500) then
-      Continue;
-    Synced:=CB[J].SyncedUs - CA[I].SyncedUs;
-    Raw:=CB[J].RawUs - CA[I].RawUs;
-    if NOT HaveBase then
-    begin
-      BaseSynced:=Synced;
-      BaseRaw:=Raw;
-      HaveBase:=True;
-    end;
-    Dev:=Abs(Synced - BaseSynced);
-    // Ignore the first 30 s while the drift fits converge.
-    if (CA[I].SyncedUs - StartUs > 30E6) AND (Dev > MaxDev) then
-      MaxDev:=Dev;
-    RawDrift:=Raw - BaseRaw;
-    Inc(Paired);
+  Render.Lock.Acquire;
+  try
+    A:=Copy(Render.ClickUs);
+  finally
+    Render.Lock.Release;
   end;
+  B.Lock.Acquire;
+  try
+    if B.Sync = nil then
+      Exit;
+    BS:=Copy(B.SyncedDetector.Clicks);
+    BR:=Copy(B.RawDetector.Clicks);
+    Origin:=B.Sync.OriginUs;
+    FirstSynced:=B.SyncedFirstIndex;
+  finally
+    B.Lock.Release;
+  end;
+  Rate:=B.Input.SampleRate;
+  // Synced onsets in QPC microseconds; raw onsets at B's nominal rate from its first packet.
+  for I:=0 to High(BS) do
+    BS[I]:=Origin + (FirstSynced + BS[I]) * 1E6 / Rate;
+  for I:=0 to High(BR) do
+    BR[I]:=B.FirstCaptureUs + BR[I] * 1E6 / Rate;
+
+  if Latency = 0 then
+  begin
+    Lat:=nil;
+    J:=0;
+    for K:=0 to Min(High(A), 30) do
+    begin
+      if A[K] < 0 then
+        Continue;
+      while (J <= High(BS)) AND (BS[J] < A[K]) do
+        Inc(J);
+      if (J <= High(BS)) AND (BS[J] - A[K] < IntervalMs * 500) then
+      begin
+        SetLength(Lat, Length(Lat) + 1);
+        Lat[High(Lat)]:=BS[J] - A[K];
+      end;
+    end;
+    if Length(Lat) < 5 then
+      Exit;
+    for I:=1 to High(Lat) do
+      for K:=I downto 1 do
+        if Lat[K] < Lat[K - 1] then
+        begin
+          Tmp:=Lat[K];
+          Lat[K]:=Lat[K - 1];
+          Lat[K - 1]:=Tmp;
+        end;
+    Latency:=Lat[Length(Lat) DIV 2];
+  end;
+
+  Pairs:=nil;
+  J:=0;
+  R:=0;
+  for K:=0 to High(A) do
+  begin
+    if A[K] < 0 then
+      Continue;
+    Want:=A[K] + Latency;
+    while (J <= High(BS)) AND (BS[J] < Want - 20000) do
+      Inc(J);
+    if (J > High(BS)) OR (Abs(BS[J] - Want) > 20000) then
+      Continue;
+    BSyncedUs:=BS[J];
+    // The raw detection of the same onset lies within a few ms of the synced one.
+    while (R <= High(BR)) AND (BR[R] < BSyncedUs - 50000) do
+      Inc(R);
+    if (R > High(BR)) OR (Abs(BR[R] - BSyncedUs) > 50000) then
+      Continue;
+    BRawUs:=BR[R];
+    SetLength(Pairs, Length(Pairs) + 1);
+    Pairs[High(Pairs)].K:=K;
+    Pairs[High(Pairs)].AUs:=A[K];
+    // A at its nominal rate from the first reading: what an uncorrected pipeline assumes.
+    Pairs[High(Pairs)].ANominalUs:=Render.FirstQpc + (Int64(K) * (Output.SampleRate * IntervalMs DIV 1000) - Render.FirstPos) * 1E6 /
+      Output.SampleRate;
+    Pairs[High(Pairs)].BSyncedUs:=BSyncedUs;
+    Pairs[High(Pairs)].BRawUs:=BRawUs;
+  end;
+
+  ClickLog.Clear;
+  ClickLog.Add('click,a_us,a_nominal_us,b_synced_us,b_raw_us,synced_diff_us,raw_diff_us');
+  MaxDev:=0;
+  for I:=0 to High(Pairs) do
+  begin
+    SyncedDiff:=Pairs[I].BSyncedUs - Pairs[I].AUs;
+    RawDiff:=Pairs[I].BRawUs - Pairs[I].ANominalUs;
+    if I = 0 then
+    begin
+      BaseSynced:=SyncedDiff;
+      BaseRaw:=RawDiff;
+    end;
+    // Ignore the first minute while B's drift fit converges.
+    if (Pairs[I].AUs - StartUs > 60E6) AND (Abs(SyncedDiff - BaseSynced) > MaxDev) then
+      MaxDev:=Abs(SyncedDiff - BaseSynced);
+    LastSynced:=SyncedDiff;
+    LastRawDrift:=RawDiff - BaseRaw;
+    ClickLog.Add(Format('%d,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f', [Pairs[I].K, Pairs[I].AUs - StartUs, Pairs[I].ANominalUs - StartUs,
+      Pairs[I].BSyncedUs - StartUs, Pairs[I].BRawUs - StartUs, SyncedDiff, RawDiff], TFormatSettings.Invariant));
+  end;
+  if (Render.LastPos > Render.FirstPos) AND (Render.LastQpc > Render.FirstQpc) then
+    APpm:=((Render.LastPos - Render.FirstPos) * 1E6 / Output.SampleRate / (Render.LastQpc - Render.FirstQpc) - 1) * 1E6;
 end;
 
 begin
@@ -432,54 +523,52 @@ begin
     end;
     if ParamCount < 3 then
     begin
-      Writeln('Usage: AudioClockLoopTest --list | AudioClockLoopTest <seconds> <render A> <capture B | --same> [csv-file]');
+      Writeln('Usage: AudioClockLoopTest --list | AudioClockLoopTest <seconds> <render A> <capture B> [csv-file]');
       Halt(2);
     end;
     Seconds:=StrToInt(ParamStr(1));
-    SameDevice:=ParamStr(3) = '--same';
     CsvFile:='';
     if ParamCount >= 4 then
       CsvFile:=ParamStr(4);
     if NOT FindDevice(ParamStr(2), True, RenderInfo) then
       raise Exception.Create('No render endpoint matches "' + ParamStr(2) + '"');
-    if NOT SameDevice AND NOT FindDevice(ParamStr(3), False, CaptureInfo) then
+    if NOT FindDevice(ParamStr(3), False, CaptureInfo) then
       raise Exception.Create('No capture endpoint matches "' + ParamStr(3) + '"');
 
     Output:=TAudioOutputWASAPI.Create;
     Render:=TRenderThread.Create(True);
+    Render.Lock:=TCriticalSection.Create;
+    B:=TCapture.Create;
     Csv:=TStringList.Create;
-    A:=nil;
-    B:=nil;
+    ClickLog:=TStringList.Create;
     try
       Output.DeviceId:=RenderInfo.Id;
       Output.ApplyVolumeOnOpen:=False;
+      Output.RequireClock:=True;
       Output.Open(48000, 2, 16);
-      Writeln(Format('RENDER %s: %d Hz, %d ch, click every %d ms', [RenderInfo.FriendlyName, Output.SampleRate, Output.Channels, IntervalMs]));
-      Detector:=TDetector.Create(Output.SampleRate);
-      try
-        SetLength(Render.Template, Length(Detector.FTemplate));
-        for I:=0 to High(Detector.FTemplate) do
-          Render.Template[I]:=Detector.FTemplate[I];
-      finally
-        Detector.Free;
-      end;
+      Writeln(Format('RENDER A %s: %d Hz, %d ch, click every %d ms', [RenderInfo.FriendlyName, Output.SampleRate, Output.Channels,
+        IntervalMs]));
+      with TDetector.Create(Output.SampleRate) do
+        try
+          Render.Template:=Copy(Template);
+        finally
+          Free;
+        end;
       Render.Output:=Output;
-      A:=OpenTrack('A', RenderInfo, True);
-      if SameDevice then
-        B:=OpenTrack('B', RenderInfo, True)
-      else
-        B:=OpenTrack('B', CaptureInfo, False);
-      Csv.Add('elapsed_s,clicks_paired,synced_diff_us,synced_dev_us,raw_drift_us,a_ppm,b_ppm,a_resyncs,b_resyncs,a_disc,b_disc');
+      B.Input:=TAudioInputWASAPI.Create;
+      B.Input.DeviceId:=CaptureInfo.Id;
+      B.Input.OnData:=B.HandleData;
+      B.Input.OnError:=B.HandleError;
+      B.Input.Open;
+      Writeln(Format('CAPTURE B %s: %d Hz, %d ch', [CaptureInfo.FriendlyName, B.Input.SampleRate, B.Input.Channels]));
+      Csv.Add('elapsed_s,clicks_paired,synced_diff_us,synced_dev_us,raw_drift_us,a_ppm,b_ppm,b_resyncs,b_disc');
 
+      StartUs:=AudioMonotonicUs;
+      Latency:=0;
       Output.Start;
       Render.Start;
-      A.Input.Start;
       B.Input.Start;
-      StartUs:=AudioMonotonicUs;
       NextLog:=StartUs + 60000000;
-      HaveBase:=False;
-      MaxDev:=0;
-      RawDrift:=0;
       while AudioMonotonicUs - StartUs < Int64(Seconds) * 1000000 do
       begin
         Sleep(200);
@@ -487,46 +576,47 @@ begin
           Continue;
         NextLog:=NextLog + 60000000;
         Measure;
-        SA:=A.Stats;
         SB:=B.Stats;
-        Writeln(Format('%6d s clicks %6d  synced B-A %9.1f us (dev %7.1f, max %7.1f)  raw drift %9.1f us  A %7.2f ppm  B %7.2f ppm  resyncs %d/%d  disc %d/%d %s%s',
-          [(AudioMonotonicUs - StartUs) DIV 1000000, Paired, Synced, Abs(Synced - BaseSynced), MaxDev, RawDrift, SA.DriftPpm, SB.DriftPpm,
-          SA.Resyncs, SB.Resyncs, A.Discontinuities, B.Discontinuities, A.Error, B.Error]));
-        Csv.Add(Format('%d,%d,%.1f,%.1f,%.1f,%.3f,%.3f,%d,%d,%d,%d', [(AudioMonotonicUs - StartUs) DIV 1000000, Paired, Synced,
-          Abs(Synced - BaseSynced), RawDrift, SA.DriftPpm, SB.DriftPpm, SA.Resyncs, SB.Resyncs, A.Discontinuities, B.Discontinuities],
-          TFormatSettings.Invariant));
+        Writeln(Format('%6d s clicks %6d  B-A %9.1f us (max dev %7.1f)  uncorrected drift %10.1f us  A %7.3f ppm  B %7.2f ppm  resyncs %d disc %d %s',
+          [(AudioMonotonicUs - StartUs) DIV 1000000, Length(Pairs), LastSynced, MaxDev, LastRawDrift, APpm, SB.DriftPpm, SB.Resyncs,
+          B.Discontinuities, B.Error]));
+        Csv.Add(Format('%d,%d,%.1f,%.1f,%.1f,%.3f,%.3f,%d,%d', [(AudioMonotonicUs - StartUs) DIV 1000000, Length(Pairs), LastSynced, MaxDev,
+          LastRawDrift, APpm, SB.DriftPpm, SB.Resyncs, B.Discontinuities], TFormatSettings.Invariant));
         if CsvFile <> '' then
+        begin
           Csv.SaveToFile(CsvFile);
+          ClickLog.SaveToFile(ChangeFileExt(CsvFile, '') + '-clicks.csv');
+        end;
       end;
       Render.Terminate;
       Render.WaitFor;
-      A.Input.Stop;
       B.Input.Stop;
       Measure;
-      SA:=A.Stats;
       SB:=B.Stats;
       Expected:=Seconds * 1000 DIV IntervalMs;
-      Ok:=HaveBase AND (MaxDev < FrameUs) AND (SA.Resyncs = 0) AND (SB.Resyncs = 0) AND (Paired >= Expected - 5) AND
-        (A.Error = '') AND (B.Error = '');
+      Ok:=(Length(Pairs) >= Expected - 5) AND (MaxDev < FrameUs) AND (SB.Resyncs = 0) AND (B.Error = '');
       Writeln;
-      Writeln(Format('RESULT %d s: %d/%d clicks paired; synced B-A %.1f us, moved at most %.1f us (limit %d us); ' +
-        'uncorrected it would have drifted %.1f us; A %.3f ppm (%d resyncs, %d disc), B %.3f ppm (%d resyncs, %d disc): %s',
-        [Seconds, Paired, Expected, BaseSynced, MaxDev, FrameUs, RawDrift, SA.DriftPpm, SA.Resyncs, A.Discontinuities, SB.DriftPpm,
-        SB.Resyncs, B.Discontinuities, BoolToStr(Ok, True)]));
-      Writeln(Format('RENDERED %d of %d bytes, device position %.2f s, sample type %d', [Render.Accepted, Render.Offered,
-        Output.DevicePositionUs / 1E6, Ord(Output.SampleType)]));
-      Writeln(Format('LEVELS A: %d clicks, peak %.4f; B: %d clicks, peak %.4f (trigger %.3f)', [Length(A.SyncedDetector.Clicks),
-        A.SyncedDetector.Peak, Length(B.SyncedDetector.Clicks), B.SyncedDetector.Peak, TriggerLevel]));
+      Writeln(Format('RESULT %d s: %d/%d clicks paired; B-A %.1f us (latency), moved at most %.1f us after the first minute ' +
+        '(limit %d us); uncorrected it drifted %.1f us; A %.3f ppm (render clock), B %.3f ppm (%d resyncs, %d disc): %s',
+        [Seconds, Length(Pairs), Expected, Latency, MaxDev, FrameUs, LastRawDrift, APpm, SB.DriftPpm, SB.Resyncs, B.Discontinuities,
+        BoolToStr(Ok, True)]));
+      Writeln(Format('DIAG render accepted %d of %d bytes, %d clock readings; B detections synced %d raw %d, peak %.4f',
+        [Render.Accepted, Render.Offered, Render.Readings, Length(B.SyncedDetector.Clicks), Length(B.RawDetector.Clicks),
+        B.SyncedDetector.Peak]));
       if CsvFile <> '' then
+      begin
         Csv.SaveToFile(CsvFile);
+        ClickLog.SaveToFile(ChangeFileExt(CsvFile, '') + '-clicks.csv');
+      end;
       if NOT Ok then
         ExitCode:=1;
     finally
+      Render.Lock.Free;
       Render.Free;
-      A.Free;
       B.Free;
       Output.Free;
       Csv.Free;
+      ClickLog.Free;
     end;
   except
     on E: Exception do
