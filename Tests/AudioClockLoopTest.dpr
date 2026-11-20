@@ -14,29 +14,26 @@ program AudioClockLoopTest;
        frame is playing and when (QPC); each click's play time is interpolated
        from those readings. No click detection on loopback: driver effects and
        other sounds on A's mix cannot produce false clicks.
-       A USB DAC locked to the USB frame clock (SOF) plays at that clock's rate,
-       but its driver may report the position at QPC rate (the Play! 3 does:
-       its loopback timestamps run at the USB frame rate while GetPosition runs
-       at QPC rate). A loopback stream to measure that cannot run beside the
-       test: on the Play! 3 it disturbs the render clock by tens of ppm.
-       Instead the USB frame rate comes from B: a device whose driver stamps
-       packets on USB frames (the G3 does, stepping back one frame whenever its
-       own crystal has gained one) advances its timestamps at the USB frame
-       rate between steps. "corrected" replaces A's reported rate with that
-       one; it applies only when A is SOF-locked and B is on the same bus.
+       A's reported positions are diagnostics only: the Play! 3 reports them at
+       QPC rate while its DAC follows the USB frame clock, and once stepped a
+       whole 10 ms buffer in an 8 h run without the audio stepping.
     B: B's capture endpoint, locked to QPC with TAudioClockSync; each click's
        arrival is timed by cross-correlation with the click template.
 
-  B - A is the analog path delay and must stay constant. The same difference
-  with both devices taken at their nominal rate (no clock correction) is logged
-  beside it and drifts by the devices' ppm difference.
+  The pass metric: A plays click k at stream frame k * 48000 at one constant
+  rate, so B's synced arrival minus A's nominal schedule must be a straight
+  line (its slope is A's rate against QPC). The largest deviation from that line
+  after the first minute must stay under one video frame (16.7 ms). B - A
+  against A's reported play times is logged beside it, and so is the same
+  difference with B uncorrected, which drifts by the devices' ppm difference.
 
     AudioClockLoopTest --list
     AudioClockLoopTest <seconds> <render A> <capture B> [csv-file]
 
   The CSV holds one row per minute; <csv-file>-clicks.csv one row per click.
-  Exit 1 if B - A moves by more than one video frame (16.7 ms) after the first
-  minute, B resyncs, or clicks go missing.
+  Exit 1 if B deviates from A's schedule by more than one video frame (16.7 ms)
+  after the first minute, B resyncs without a flagged discontinuity, or clicks
+  go missing.
 }
 
 uses
@@ -321,7 +318,7 @@ begin
         Mono[I]:=Mono[I] + Floats[I * Ch + C];
     end;
     RawDetector.Append(@Mono[0], N);
-    Produced:=Sync.Push(@Floats[0], N, Packet.CaptureTimeUs, Output, 0, NOT Packet.TimestampError);
+    Produced:=Sync.Push(@Floats[0], N, Packet.CaptureTimeUs, Output, 0, NOT Packet.TimestampError, Packet.Discontinuity);
     if (Produced > 0) AND (SyncedFirstIndex < 0) then
       SyncedFirstIndex:=Sync.NextOutputFrame - Produced;
     if Produced > 0 then
@@ -505,7 +502,7 @@ var
   B: TCapture;
   StartUs, NextLog: Int64;
   Pairs: TArray<TPair>;
-  Latency, BaseSynced, BaseRaw, BaseCorrected, MaxDev, MaxDevUncorrected, LastSynced, LastRawDrift, APpm, AUsbPpm: Double;
+  Latency, BaseSynced, BaseRaw, BaseCorrected, MaxDev, MaxDevUncorrected, LastSynced, LastRawDrift, APpm, AUsbPpm, AFitPpm: Double;
   Csv, ClickLog: TStringList;
   CsvFile: string;
   SB: TAudioClockSyncStats;
@@ -518,6 +515,7 @@ var
   A: TArray<Double>;
   BS, BR: TArray<Double>;
   Rate, Want, BSyncedUs, BRawUs, SyncedDiff, RawDiff, CorrectedDiff, Tmp, RawOffset: Double;
+  FitSlope, FitIntercept, Residual: Double;
   I, J, R, K: Integer;
   Lat: TArray<Double>;
   Sx, Sy, Sxx, Sxy, X, Y: Double;
@@ -624,8 +622,31 @@ begin
     Pairs[High(Pairs)].BRawUs:=BRawUs;
   end;
 
+  // Primary metric: B's synced arrivals against A's frame schedule. A's DAC plays the clicks at
+  // exact stream frames and at one constant rate (its own crystal or the USB frame clock), so
+  // B - A_nominal must be a straight line; its slope is A's rate against QPC and every deviation
+  // from it is B's error. A's reported positions are not used: the Play! 3 reports them at QPC
+  // rate and once stepped by a whole 10 ms buffer (E07.3), which is no error of B.
+  Sx:=0; Sy:=0; Sxx:=0; Sxy:=0; N:=0;
+  for I:=0 to High(Pairs) do
+    if Pairs[I].ANominalUs - StartUs > 60E6 then
+    begin
+      X:=(Pairs[I].ANominalUs - StartUs) / 1E6;
+      Y:=Pairs[I].BSyncedUs - Pairs[I].ANominalUs;
+      Sx:=Sx + X; Sy:=Sy + Y; Sxx:=Sxx + X * X; Sxy:=Sxy + X * Y;
+      Inc(N);
+    end;
+  FitSlope:=0;
+  FitIntercept:=0;
+  if (N >= 10) AND (N * Sxx - Sx * Sx > 0) then
+  begin
+    FitSlope:=(N * Sxy - Sx * Sy) / (N * Sxx - Sx * Sx);
+    FitIntercept:=(Sy - FitSlope * Sx) / N;
+  end;
+  AFitPpm:=-FitSlope;
+
   ClickLog.Clear;
-  ClickLog.Add('click,a_us,a_nominal_us,b_synced_us,b_raw_us,synced_diff_us,raw_diff_us,synced_corrected_us');
+  ClickLog.Add('click,a_us,a_nominal_us,b_synced_us,b_raw_us,synced_diff_us,raw_diff_us,synced_corrected_us,fit_residual_us');
   MaxDev:=0;
   MaxDevUncorrected:=0;
   for I:=0 to High(Pairs) do
@@ -641,16 +662,18 @@ begin
       BaseRaw:=RawDiff;
       BaseCorrected:=CorrectedDiff;
     end;
+    X:=(Pairs[I].ANominalUs - StartUs) / 1E6;
+    Residual:=(Pairs[I].BSyncedUs - Pairs[I].ANominalUs) - (FitIntercept + FitSlope * X);
     // Ignore the first minute while B's drift fit converges.
     if Pairs[I].AUs - StartUs > 60E6 then
     begin
-      MaxDev:=Max(MaxDev, Abs(CorrectedDiff - BaseCorrected));
+      MaxDev:=Max(MaxDev, Abs(Residual));
       MaxDevUncorrected:=Max(MaxDevUncorrected, Abs(SyncedDiff - BaseSynced));
     end;
     LastSynced:=SyncedDiff;
     LastRawDrift:=RawDiff - BaseRaw;
-    ClickLog.Add(Format('%d,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f', [Pairs[I].K, Pairs[I].AUs - StartUs, Pairs[I].ANominalUs - StartUs,
-      Pairs[I].BSyncedUs - StartUs, Pairs[I].BRawUs - StartUs, SyncedDiff, RawDiff, CorrectedDiff], TFormatSettings.Invariant));
+    ClickLog.Add(Format('%d,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f', [Pairs[I].K, Pairs[I].AUs - StartUs, Pairs[I].ANominalUs - StartUs,
+      Pairs[I].BSyncedUs - StartUs, Pairs[I].BRawUs - StartUs, SyncedDiff, RawDiff, CorrectedDiff, Residual], TFormatSettings.Invariant));
   end;
 end;
 
@@ -717,8 +740,8 @@ begin
         NextLog:=NextLog + 60000000;
         Measure;
         SB:=B.Stats;
-        Writeln(Format('%6d s clicks %6d  B-A %9.1f us (max dev %7.1f, %7.1f before A rate)  uncorrected drift %10.1f us  A %7.3f ppm reported %7.3f ppm USB frames  B %7.2f ppm  resyncs %d disc %d %s',
-          [(AudioMonotonicUs - StartUs) DIV 1000000, Length(Pairs), LastSynced, MaxDev, MaxDevUncorrected, LastRawDrift, APpm, AUsbPpm,
+        Writeln(Format('%6d s clicks %6d  B-A %9.1f us (max dev %7.1f from A''s schedule, %7.1f against A''s reports)  uncorrected drift %10.1f us  A %7.3f ppm fit %7.3f reported %7.3f USB frames  B %7.2f ppm  resyncs %d disc %d %s',
+          [(AudioMonotonicUs - StartUs) DIV 1000000, Length(Pairs), LastSynced, MaxDev, MaxDevUncorrected, LastRawDrift, AFitPpm, APpm, AUsbPpm,
           SB.DriftPpm, SB.Resyncs, B.Discontinuities, B.Error]));
         Csv.Add(Format('%d,%d,%.1f,%.1f,%.1f,%.1f,%.3f,%.3f,%.3f,%d,%d', [(AudioMonotonicUs - StartUs) DIV 1000000, Length(Pairs), LastSynced,
           MaxDev, MaxDevUncorrected, LastRawDrift, APpm, AUsbPpm, SB.DriftPpm, SB.Resyncs, B.Discontinuities], TFormatSettings.Invariant));
@@ -734,13 +757,14 @@ begin
       Measure;
       SB:=B.Stats;
       Expected:=Seconds * 1000 DIV IntervalMs;
-      Ok:=(Length(Pairs) >= Expected - 5) AND (MaxDev < FrameUs) AND (SB.Resyncs = 0) AND (B.Error = '') AND (AUsbPpm <> 0);
+      // A resync is acceptable only where the device flagged lost data (bridged with silence).
+      Ok:=(Length(Pairs) >= Expected - 5) AND (MaxDev < FrameUs) AND (SB.Resyncs <= B.Discontinuities) AND (B.Error = '');
       Writeln;
-      Writeln(Format('RESULT %d s: %d/%d clicks paired; B-A %.1f us (latency), moved at most %.1f us after the first minute ' +
-        '(limit %d us; %.1f us against the reported A rate); uncorrected it drifted %.1f us; A %.3f ppm reported, %.3f ppm USB frames (%d/%d steps), ' +
-        'B %.3f ppm (%d resyncs, %d disc): %s',
-        [Seconds, Length(Pairs), Expected, Latency, MaxDev, FrameUs, MaxDevUncorrected, LastRawDrift, APpm, AUsbPpm, B.FrameSteps, B.ForwardSteps,
-        SB.DriftPpm, SB.Resyncs, B.Discontinuities, BoolToStr(Ok, True)]));
+      Writeln(Format('RESULT %d s: %d/%d clicks paired; B-A %.1f us (latency), deviates at most %.1f us from A''s frame schedule ' +
+        'after the first minute (limit %d us; %.1f us against A''s reported positions); uncorrected it drifted %.1f us; ' +
+        'A %.3f ppm fit, %.3f ppm reported, %.3f ppm USB frames (%d/%d steps); B %.3f ppm (%d resyncs, %d disc): %s',
+        [Seconds, Length(Pairs), Expected, Latency, MaxDev, FrameUs, MaxDevUncorrected, LastRawDrift, AFitPpm, APpm, AUsbPpm, B.FrameSteps,
+        B.ForwardSteps, SB.DriftPpm, SB.Resyncs, B.Discontinuities, BoolToStr(Ok, True)]));
       Writeln(Format('DIAG render accepted %d of %d bytes, %d clock readings; B detections synced %d raw %d, peak %.4f',
         [Render.Accepted, Render.Offered, Render.Readings, Length(B.SyncedDetector.Clicks), Length(B.RawDetector.Clicks),
         B.SyncedDetector.Peak]));

@@ -51,6 +51,10 @@ type
     WanderPeriodS: Double;
     JitterUs: Double;
     StallAtS, StallMs: Double;
+    // The first packet after the stall carries the device's discontinuity flag.
+    FlagStall: Boolean;
+    // Flags the packet at this time as a discontinuity without losing anything (-1: none).
+    FlagAtS: Double;
     GlitchAtS, GlitchMs: Double;
     // Timestamps from a frame clock: they lag the true capture time by an amount that
     // grows at SawPpm and snaps back by SawStepUs once it reaches it (seen on a
@@ -79,6 +83,7 @@ begin
   Result.JitterUs:=500;
   Result.StallAtS:=-1;
   Result.GlitchAtS:=-1;
+  Result.FlagAtS:=-1;
   Result.MaxCorrectionPpm:=2000;
 end;
 
@@ -101,7 +106,7 @@ var
   Index: Int64;
   Input: TArray<Single>;
   Output: TArray<Single>;
-  Stalled, Valid: Boolean;
+  Stalled, Valid, Flag, WasStalled: Boolean;
   SigSum, ResSum, A, B, Saa, Sbb, Sab, Sya, Syb, Det, Ca, Cb, Y, W: Double;
   Block, N: Integer;
   Started: TDateTime;
@@ -122,6 +127,7 @@ begin
     TTrue:=0;
     Origin:=0;
     LostFrames:=0;
+    WasStalled:=False;
     Ppm:=S.Ppm;
     SigSum:=0;
     ResSum:=0;
@@ -155,9 +161,12 @@ begin
       if Stalled then
       begin
         Inc(LostFrames, PacketFrames);
+        WasStalled:=True;
         Continue;
       end;
-      Produced:=Sync.Push(@Input[0], PacketFrames, Round(Reported), Output, 0, Valid);
+      Flag:=(S.FlagStall AND WasStalled) OR ((S.FlagAtS >= 0) AND (P = Round(S.FlagAtS * Fs / PacketFrames)));
+      WasStalled:=False;
+      Produced:=Sync.Push(@Input[0], PacketFrames, Round(Reported), Output, 0, Valid, Flag);
 
       // True alignment of the next output frame. Input positions count bridged silence;
       // map them back to device frames with the real number of lost frames.
@@ -289,6 +298,29 @@ begin
     Check(Abs(R.Stats.SilenceInputFrames - 9600) <= PacketFrames,
       Format('%s: gap bridged with %d frames of silence (200 ms = 9600)', [S.Name, R.Stats.SilenceInputFrames]));
     Check(Abs(R.FinalErrorUs) < 1000, Format('%s: aligned again (final %.1f us)', [S.Name, R.FinalErrorUs]));
+
+    // A dropped 10 ms buffer, below the resync threshold. Unflagged it is slewed out over
+    // seconds (as seen on the G3 in E07.3); flagged as a discontinuity it is bridged at once.
+    S:=Scenario('drop 10 ms', 120, 12);
+    S.StallAtS:=30;
+    S.StallMs:=10;
+    R:=Run(S);
+    Check((R.Stats.Resyncs = 0) AND (R.MaxAbsErrorUs > 5000) AND (R.MaxAbsErrorUs < 11000) AND (Abs(R.FinalErrorUs) < 1000),
+      Format('%s: unflagged, slewed out (max %.1f us, final %.1f us, resyncs %d)', [S.Name, R.MaxAbsErrorUs, R.FinalErrorUs,
+      R.Stats.Resyncs]));
+    S:=Scenario('flagged drop 10 ms', 60, 12);
+    S.StallAtS:=30;
+    S.StallMs:=10;
+    S.FlagStall:=True;
+    R:=Run(S);
+    Check((R.Stats.Resyncs = 1) AND (Abs(R.Stats.SilenceInputFrames - 480) <= 48) AND (R.MaxAbsErrorUs < 1000),
+      Format('%s: bridged with %d frames of silence at once (max %.1f us)', [S.Name, R.Stats.SilenceInputFrames, R.MaxAbsErrorUs]));
+    // Timestamp jitter on a flagged packet must not insert silence by itself.
+    S:=Scenario('flagged, no gap', 60, 12);
+    S.FlagAtS:=30;
+    R:=Run(S);
+    Check((R.Stats.Resyncs = 0) AND (R.Stats.SilenceInputFrames = 0) AND (R.MaxAbsErrorUs < 1000),
+      Format('%s: jitter alone inserts nothing (silence %d, max %.1f us)', [S.Name, R.Stats.SilenceInputFrames, R.MaxAbsErrorUs]));
 
     // Flagged timestamp glitch: +80 ms on one packet must not be mistaken for a gap.
     S:=Scenario('flagged glitch', 60, -50);

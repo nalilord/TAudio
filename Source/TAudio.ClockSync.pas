@@ -23,7 +23,10 @@ unit TAudio.ClockSync;
 
   A capture-time gap larger than the threshold (e.g. loopback capture of an idle
   render stream delivers nothing) is bridged with silence at the device rate, so
-  the input timeline stays continuous.
+  the input timeline stays continuous. When the device flags the packet as a
+  discontinuity (data was lost), gaps above DiscontinuityThresholdMs (2 ms) are
+  bridged the same way: a 10 ms buffer the driver dropped costs 10 ms of silence
+  instead of 10 s of slewing at the correction limit.
 
   Interleaved Float32 in and out. Not thread-safe: call from one thread.
 
@@ -67,6 +70,7 @@ type
     FWindowSeconds: Double;
     FResponseSeconds: Double;
     FResyncThresholdMs: Double;
+    FDiscontinuityThresholdMs: Double;
     FConvergeSeconds: Double;
     FStarted: Boolean;
     FOriginUs: Int64;
@@ -91,7 +95,7 @@ type
     // TimestampValid = False (WASAPI AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR) keeps the packet out of
     // the fit and the gap check; its frames still play.
     function Push(Data: PSingle; Frames: Integer; CaptureTimeUs: Int64; var Output: TArray<Single>;
-      OutputOffset: Integer = 0; TimestampValid: Boolean = True): Integer;
+      OutputOffset: Integer = 0; TimestampValid: Boolean = True; Discontinuity: Boolean = False): Integer;
     function Stats: TAudioClockSyncStats;
     // Reference time of output frame K (microseconds).
     function OutputFrameTimeUs(K: Int64): Int64;
@@ -108,6 +112,10 @@ type
     property WindowSeconds: Double read FWindowSeconds write FWindowSeconds;
     property ResponseSeconds: Double read FResponseSeconds write FResponseSeconds;
     property ResyncThresholdMs: Double read FResyncThresholdMs write FResyncThresholdMs;
+    // A packet the device flags as a discontinuity (WASAPI DATA_DISCONTINUITY: data was lost)
+    // bridges any gap above this with silence at once, instead of slewing it out over seconds.
+    // Unflagged gaps still need ResyncThresholdMs, so timestamp jitter never inserts silence.
+    property DiscontinuityThresholdMs: Double read FDiscontinuityThresholdMs write FDiscontinuityThresholdMs;
     // Time after start before MaxAbsErrorUs is tracked.
     property ConvergeSeconds: Double read FConvergeSeconds write FConvergeSeconds;
   end;
@@ -129,6 +137,7 @@ begin
   FWindowSeconds:=30;
   FResponseSeconds:=2;
   FResyncThresholdMs:=40;
+  FDiscontinuityThresholdMs:=2;
   FConvergeSeconds:=10;
   SetLength(FPointN, MaxPoints);
   SetLength(FPointT, MaxPoints);
@@ -219,7 +228,7 @@ begin
 end;
 
 function TAudioClockSync.Push(Data: PSingle; Frames: Integer; CaptureTimeUs: Int64; var Output: TArray<Single>;
-  OutputOffset: Integer; TimestampValid: Boolean): Integer;
+  OutputOffset: Integer; TimestampValid, Discontinuity: Boolean): Integer;
 var
   T, Gap, ErrorFrames, Step, MaxDelta, Target: Double;
   GapFrames, Pad: Integer;
@@ -242,7 +251,7 @@ begin
   if TimestampValid AND (FPointCount > 0) then
   begin
     Gap:=T - PredictTime(FResampler.InputFrames);
-    if Gap > FResyncThresholdMs * 1000 then
+    if (Gap > FResyncThresholdMs * 1000) OR (Discontinuity AND (Gap > FDiscontinuityThresholdMs * 1000)) then
     begin
       GapFrames:=Round(Gap / FSlope);
       FResampler.InsertSilence(GapFrames);
