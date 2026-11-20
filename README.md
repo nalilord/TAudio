@@ -22,6 +22,8 @@ source library; it does not require a component package or a particular UI toolk
 | `TAudio.Input.WASAPI` | Shared-mode capture of capture endpoints and loopback of render endpoints, QPC timestamps |
 | `TAudio.Resample` | Variable-ratio Float32 resampler (Kaiser-windowed sinc, 32 taps, 1024 phases) |
 | `TAudio.ClockSync` | Locks a capture device clock to the reference clock: drift fit, bounded-ratio resampling, counted resyncs |
+| `TAudio.Mixer` | Timestamp-driven mixer: inputs written at absolute frames, gain/mute/balance, bus masks (tracks), counted gaps and late data |
+| `TAudio.Meter` | Peak, RMS and EBU R128 loudness (momentary, short-term, gated integrated) on BS.1770 K-weighting |
 
 ## Capturing and clock drift
 
@@ -51,6 +53,28 @@ are counted. `Examples/CaptureDrift` measures any set of endpoints at once;
 every second, a cable feeds it into device B, and the clock-synced arrival times
 in A's loopback and B's capture must keep a constant offset (the analog delay)
 while the uncorrected offset drifts by the devices' ppm difference.
+
+## Mixing
+
+```pascal
+uses TAudio.Mixer;
+
+// Mixer:=TAudioMixer.Create(48000, 2, 6);    // stereo, six buses (OBS tracks)
+// Mic:=Mixer.AddInput('Microphone');
+// Mic.GainDb:=-3; Mic.BusMask:=%11;         // tracks 1 and 2
+// capture thread: Mic.Write(Floats, Frames, Channels, StartFrame);
+// mixing thread:  Mixer.Mix(Position, 480); then read Mixer.BusData[0]
+```
+
+Inputs write at absolute positions on the mixer timeline, so live devices locked
+to the reference clock by `TAudioClockSync` line up sample-exactly however they
+chunk their packets. `Mix(StartFrame, Frames)` renders exactly that range; data
+that is early waits, gaps are silence, data for an already mixed range is
+dropped, and all of it is counted per input. The mixer has no clock: the caller
+decides when a range is final. Gain changes ramp over one block. Every input has
+a post-fader meter and every bus a meter (`TAudio.Meter`, EBU R128 loudness, sample
+peak, RMS, clip count). `Tests/AudioMixerSmoke` checks both, including the BS.1770
+filter coefficients and the EBU Tech 3341 reference levels.
 
 ## Opening and writing
 
