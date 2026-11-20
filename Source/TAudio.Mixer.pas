@@ -108,6 +108,9 @@ type
     // A copy of the post-fader meter, safe from any thread.
     function MeterSnapshot: TAudioMeterSnapshot;
     procedure ResetCounters;
+    // One past the newest buffered frame; Low(Int64) before the first write. A caller that mixes
+    // without a clock (files, tests) mixes a range once every input has written past it.
+    function WrittenUntil: Int64;
     property Name: string read FName;
     property Gain: Double read GetGain write SetGain;
     property GainDb: Double read GetGainDb write SetGainDb;
@@ -462,6 +465,23 @@ begin
   end;
 end;
 
+function TAudioMixerInput.WrittenUntil: Int64;
+begin
+  FLock.Acquire;
+  try
+    if FHasData then
+      Result:=FEndFrame
+    else if FMixStarted AND (FFramesWritten > 0) then
+      Result:=FMixedUntil
+    else if FFramesWritten > 0 then
+      Result:=FEndFrame
+    else
+      Result:=Low(Int64);
+  finally
+    FLock.Release;
+  end;
+end;
+
 procedure TAudioMixerInput.ResetCounters;
 begin
   FLock.Acquire;
@@ -529,8 +549,11 @@ procedure TAudioMixer.RemoveInput(AInput: TAudioMixerInput);
 begin
   FInputsLock.Acquire;
   try
-    if FInputs.Remove(AInput) >= 0 then
+    if FInputs.IndexOf(AInput) >= 0 then
+    begin
+      FInputs.Delete(FInputs.IndexOf(AInput));
       AInput.Free;
+    end;
   finally
     FInputsLock.Release;
   end;
