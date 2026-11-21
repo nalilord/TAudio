@@ -167,6 +167,7 @@ begin
     Check(Near(BusSample(M, 0, 0, 0), 0.25, 1E-6) AND Near(BusSample(M, 0, 479, 0), 0.25, 1E-6), 'muted input leaves the mix');
     B.Muted:=False;
 
+
     // Bus masks: A on bus 0, B on bus 1 only.
     A.BusMask:=1;
     B.BusMask:=2;
@@ -314,6 +315,37 @@ begin
   end;
 end;
 
+// Active: an independent automation gate, ramped like mute, Muted untouched.
+procedure TestActiveGate;
+var
+  M: TAudioMixer;
+  A, B: TAudioMixerInput;
+  I: Integer;
+begin
+  M:=TAudioMixer.Create(Fs, 2, 1, 1000);
+  try
+    A:=M.AddInput('A');
+    B:=M.AddInput('B');
+    B.Active:=False;
+    for I:=0 to 1 do
+    begin
+      WriteConst(A, I * 480, 480, 0.25);
+      WriteConst(B, I * 480, 480, 0.25);
+      M.Mix(I * 480, 480);
+    end;
+    Check(Near(BusSample(M, 0, 0, 0), 0.25, 1E-6) AND Near(BusSample(M, 0, 479, 0), 0.25, 1E-6) AND NOT B.Muted,
+      'an inactive input leaves the mix and stays unmuted');
+    B.Active:=True;
+    WriteConst(A, 960, 480, 0.25);
+    WriteConst(B, 960, 480, 0.25);
+    M.Mix(960, 480);
+    Check((BusSample(M, 0, 0, 0) < BusSample(M, 0, 479, 0)) AND Near(BusSample(M, 0, 479, 0), 0.5, 1E-3),
+      Format('reactivating ramps back in over one block (%.4f -> %.4f)', [BusSample(M, 0, 0, 0), BusSample(M, 0, 479, 0)]));
+  finally
+    M.Free;
+  end;
+end;
+
 procedure TestThreads;
 var
   M: TAudioMixer;
@@ -366,6 +398,7 @@ begin
   try
     TestMeter;
     TestMixer;
+    TestActiveGate;
     TestThreads;
   except
     on E: Exception do

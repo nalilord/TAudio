@@ -63,6 +63,7 @@ uses TAudio.Mixer;
 // Mixer:=TAudioMixer.Create(48000, 2, 6);    // stereo, six buses (tracks)
 // Mic:=Mixer.AddInput('Microphone');
 // Mic.GainDb:=-3; Mic.BusMask:=%11;         // tracks 1 and 2
+// Browser.Active:=False;                    // automation gate (e.g. picture off air), next to Muted
 // capture thread: Mic.Write(Floats, Frames, Channels, StartFrame);
 // mixing thread:  Mixer.Mix(Position, 480); then read Mixer.BusData[0]
 ```

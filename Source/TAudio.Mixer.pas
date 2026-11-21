@@ -87,6 +87,7 @@ type
     // Parameters (under FLock).
     FGain: Double;
     FMuted: Boolean;
+    FActive: Boolean;
     FBalance: Double;
     FBusMask: Cardinal;
     // Gains last applied, for the ramp.
@@ -115,6 +116,8 @@ type
     procedure SetBusMask(AValue: Cardinal);
     function GetGain: Double;
     function GetMuted: Boolean;
+    function GetActive: Boolean;
+    procedure SetActive(AValue: Boolean);
     function GetBalance: Double;
     function GetBusMask: Cardinal;
     function Slot(AFrame: Int64): Integer;
@@ -151,6 +154,10 @@ type
     property Gain: Double read GetGain write SetGain;
     property GainDb: Double read GetGainDb write SetGainDb;
     property Muted: Boolean read GetMuted write SetMuted;
+    // A second, independent gate for automation (for example: the input's video source is
+    // not on air). Inactive sounds like muted (ramped, silent for sidechains), but leaves
+    // Muted, the user's choice, alone. Default True.
+    property Active: Boolean read GetActive write SetActive;
     // 0 = left only, 0.5 = centre, 1 = right only.
     property Balance: Double read GetBalance write SetBalance;
     property BusMask: Cardinal read GetBusMask write SetBusMask;
@@ -253,6 +260,7 @@ begin
   FCapacity:=ABufferFrames;
   SetLength(FRing, FCapacity * AMixer.Channels);
   FGain:=1;
+  FActive:=True;
   FBalance:=0.5;
   FBusMask:=1;
   FAppliedLeft:=-1;
@@ -313,6 +321,26 @@ begin
   FLock.Acquire;
   try
     Result:=FMuted;
+  finally
+    FLock.Release;
+  end;
+end;
+
+function TAudioMixerInput.GetActive: Boolean;
+begin
+  FLock.Acquire;
+  try
+    Result:=FActive;
+  finally
+    FLock.Release;
+  end;
+end;
+
+procedure TAudioMixerInput.SetActive(AValue: Boolean);
+begin
+  FLock.Acquire;
+  try
+    FActive:=AValue;
   finally
     FLock.Release;
   end;
@@ -788,7 +816,7 @@ begin
         SidePtr:=@Side.FSideOut[0];
       TAudioFilter(AInput.FFilters[I]).Process(@AInput.FScratch[0], AFrames, SidePtr);
     end;
-    Muted:=AInput.FMuted;
+    Muted:=AInput.FMuted OR NOT AInput.FActive;
     if Length(AInput.FSideOut) < N then
       SetLength(AInput.FSideOut, N);
     if Muted then
@@ -830,7 +858,7 @@ begin
       Input.FLock.Acquire;
       try
         Gain:=Input.FGain;
-        Muted:=Input.FMuted;
+        Muted:=Input.FMuted OR NOT Input.FActive;
         Balance:=Input.FBalance;
         Mask:=Input.FBusMask;
         if Muted then
