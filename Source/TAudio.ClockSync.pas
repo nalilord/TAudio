@@ -77,6 +77,11 @@ type
     // Fit points: input position (resampler coordinates) and capture time relative to origin.
     FPointN: array of Double;
     FPointT: array of Double;
+    // Segment of each point: a bridged gap starts a new segment. The device clock (slope) is
+    // fitted across segments, the offset (intercept) from the newest one only, so an error
+    // in the size of a bridged gap never bends the fit.
+    FPointSeg: array of Integer;
+    FSegment: Integer;
     FPointHead, FPointCount: Integer;
     FSlope: Double;   // microseconds per input frame
     FIntercept: Double;
@@ -141,6 +146,7 @@ begin
   FConvergeSeconds:=10;
   SetLength(FPointN, MaxPoints);
   SetLength(FPointT, MaxPoints);
+  SetLength(FPointSeg, MaxPoints);
   FSlope:=1E6 / NominalRate;
 end;
 
@@ -161,6 +167,7 @@ begin
   end;
   FPointN[(FPointHead + FPointCount) MOD MaxPoints]:=N;
   FPointT[(FPointHead + FPointCount) MOD MaxPoints]:=T;
+  FPointSeg[(FPointHead + FPointCount) MOD MaxPoints]:=FSegment;
   Inc(FPointCount);
   Newest:=T;
   while (FPointCount > 2) AND (Newest - FPointT[FPointHead] > FWindowSeconds * 1E6) do
@@ -172,39 +179,57 @@ end;
 
 procedure TAudioClockSync.Fit;
 var
-  I, J: Integer;
-  MeanN, MeanT, Snn, Snt, DN: Double;
-  Span: Double;
+  I, J, Seg, K: Integer;
+  N0, T0, DN, DT, Sn, St, Snn, Snt, SnnAll, SntAll, Span, MeanN, MeanT: Double;
+
+  procedure CloseSegment;
+  begin
+    if K = 0 then
+      Exit;
+    SnnAll:=SnnAll + Snn - Sn * Sn / K;
+    SntAll:=SntAll + Snt - Sn * St / K;
+    MeanN:=Sn / K;
+    MeanT:=St / K;
+  end;
+
 begin
   if FPointCount = 0 then
     Exit;
+  // Sums relative to the oldest point keep the products small.
+  N0:=FPointN[FPointHead];
+  T0:=FPointT[FPointHead];
+  SnnAll:=0;
+  SntAll:=0;
   MeanN:=0;
   MeanT:=0;
+  K:=0;
+  Sn:=0; St:=0; Snn:=0; Snt:=0;
+  Seg:=FPointSeg[FPointHead];
   for I:=0 to FPointCount - 1 do
   begin
     J:=(FPointHead + I) MOD MaxPoints;
-    MeanN:=MeanN + FPointN[J];
-    MeanT:=MeanT + FPointT[J];
+    if FPointSeg[J] <> Seg then
+    begin
+      CloseSegment;
+      Seg:=FPointSeg[J];
+      K:=0;
+      Sn:=0; St:=0; Snn:=0; Snt:=0;
+    end;
+    DN:=FPointN[J] - N0;
+    DT:=FPointT[J] - T0;
+    Inc(K);
+    Sn:=Sn + DN;
+    St:=St + DT;
+    Snn:=Snn + DN * DN;
+    Snt:=Snt + DN * DT;
   end;
-  MeanN:=MeanN / FPointCount;
-  MeanT:=MeanT / FPointCount;
+  // MeanN/MeanT end up as the newest segment's.
+  CloseSegment;
   Span:=FPointT[(FPointHead + FPointCount - 1) MOD MaxPoints] - FPointT[FPointHead];
   // Until a second of history exists, keep the previous (initially nominal) slope.
-  if (FPointCount >= 10) AND (Span >= 1E6) then
-  begin
-    Snn:=0;
-    Snt:=0;
-    for I:=0 to FPointCount - 1 do
-    begin
-      J:=(FPointHead + I) MOD MaxPoints;
-      DN:=FPointN[J] - MeanN;
-      Snn:=Snn + DN * DN;
-      Snt:=Snt + DN * (FPointT[J] - MeanT);
-    end;
-    if Snn > 0 then
-      FSlope:=Snt / Snn;
-  end;
-  FIntercept:=MeanT - FSlope * MeanN;
+  if (FPointCount >= 10) AND (Span >= 1E6) AND (SnnAll > 0) then
+    FSlope:=SntAll / SnnAll;
+  FIntercept:=(T0 + MeanT) - FSlope * (N0 + MeanN);
 end;
 
 function TAudioClockSync.PredictTime(N: Double): Double;
@@ -255,6 +280,7 @@ begin
     begin
       GapFrames:=Round(Gap / FSlope);
       FResampler.InsertSilence(GapFrames);
+      Inc(FSegment);
       Inc(FStats.SilenceInputFrames, GapFrames);
       Inc(FStats.Resyncs);
     end;
