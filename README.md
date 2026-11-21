@@ -64,6 +64,7 @@ uses TAudio.Mixer;
 // Mic:=Mixer.AddInput('Microphone');
 // Mic.GainDb:=-3; Mic.BusMask:=%11;         // tracks 1 and 2
 // Browser.Active:=False;                    // automation gate (e.g. picture off air), next to Muted
+// Browser.ActiveGain:=0.25;                // the gate as a level, for crossfades
 // capture thread: Mic.Write(Floats, Frames, Channels, StartFrame);
 // mixing thread:  Mixer.Mix(Position, 480); then read Mixer.BusData[0]
 ```

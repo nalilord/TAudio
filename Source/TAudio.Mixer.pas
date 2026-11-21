@@ -87,7 +87,7 @@ type
     // Parameters (under FLock).
     FGain: Double;
     FMuted: Boolean;
-    FActive: Boolean;
+    FActiveGain: Double;
     FBalance: Double;
     FBusMask: Cardinal;
     // Gains last applied, for the ramp.
@@ -118,6 +118,8 @@ type
     function GetMuted: Boolean;
     function GetActive: Boolean;
     procedure SetActive(AValue: Boolean);
+    function GetActiveGain: Double;
+    procedure SetActiveGain(AValue: Double);
     function GetBalance: Double;
     function GetBusMask: Cardinal;
     function Slot(AFrame: Int64): Integer;
@@ -156,8 +158,12 @@ type
     property Muted: Boolean read GetMuted write SetMuted;
     // A second, independent gate for automation (for example: the input's video source is
     // not on air). Inactive sounds like muted (ramped, silent for sidechains), but leaves
-    // Muted, the user's choice, alone. Default True.
+    // Muted, the user's choice, alone. Default True. Shorthand for ActiveGain 0 / 1.
     property Active: Boolean read GetActive write SetActive;
+    // The automation gate as a level, 0..1, multiplied with Gain and ramped over one block
+    // like it: a crossfade sets it step by step (for example along a video transition).
+    // Sidechains hear the input unless the level is 0.
+    property ActiveGain: Double read GetActiveGain write SetActiveGain;
     // 0 = left only, 0.5 = centre, 1 = right only.
     property Balance: Double read GetBalance write SetBalance;
     property BusMask: Cardinal read GetBusMask write SetBusMask;
@@ -260,7 +266,7 @@ begin
   FCapacity:=ABufferFrames;
   SetLength(FRing, FCapacity * AMixer.Channels);
   FGain:=1;
-  FActive:=True;
+  FActiveGain:=1;
   FBalance:=0.5;
   FBusMask:=1;
   FAppliedLeft:=-1;
@@ -328,19 +334,32 @@ end;
 
 function TAudioMixerInput.GetActive: Boolean;
 begin
+  Result:=GetActiveGain > 0;
+end;
+
+procedure TAudioMixerInput.SetActive(AValue: Boolean);
+begin
+  if AValue then
+    SetActiveGain(1)
+  else
+    SetActiveGain(0);
+end;
+
+function TAudioMixerInput.GetActiveGain: Double;
+begin
   FLock.Acquire;
   try
-    Result:=FActive;
+    Result:=FActiveGain;
   finally
     FLock.Release;
   end;
 end;
 
-procedure TAudioMixerInput.SetActive(AValue: Boolean);
+procedure TAudioMixerInput.SetActiveGain(AValue: Double);
 begin
   FLock.Acquire;
   try
-    FActive:=AValue;
+    FActiveGain:=EnsureRange(AValue, 0, 1);
   finally
     FLock.Release;
   end;
@@ -816,7 +835,7 @@ begin
         SidePtr:=@Side.FSideOut[0];
       TAudioFilter(AInput.FFilters[I]).Process(@AInput.FScratch[0], AFrames, SidePtr);
     end;
-    Muted:=AInput.FMuted OR NOT AInput.FActive;
+    Muted:=AInput.FMuted OR (AInput.FActiveGain <= 0);
     if Length(AInput.FSideOut) < N then
       SetLength(AInput.FSideOut, N);
     if Muted then
@@ -858,11 +877,13 @@ begin
       Input.FLock.Acquire;
       try
         Gain:=Input.FGain;
-        Muted:=Input.FMuted OR NOT Input.FActive;
+        Muted:=Input.FMuted OR (Input.FActiveGain <= 0);
         Balance:=Input.FBalance;
         Mask:=Input.FBusMask;
         if Muted then
-          Gain:=0;
+          Gain:=0
+        else
+          Gain:=Gain * Input.FActiveGain;
         BalanceGains(Balance, Left, Right);
         Left:=Left * Gain;
         Right:=Right * Gain;

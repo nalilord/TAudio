@@ -341,6 +341,16 @@ begin
     M.Mix(960, 480);
     Check((BusSample(M, 0, 0, 0) < BusSample(M, 0, 479, 0)) AND Near(BusSample(M, 0, 479, 0), 0.5, 1E-3),
       Format('reactivating ramps back in over one block (%.4f -> %.4f)', [BusSample(M, 0, 0, 0), BusSample(M, 0, 479, 0)]));
+    // ActiveGain: a level for crossfades.
+    B.ActiveGain:=0.5;
+    for I:=0 to 1 do
+    begin
+      WriteConst(A, 1440 + I * 480, 480, 0.25);
+      WriteConst(B, 1440 + I * 480, 480, 0.25);
+      M.Mix(1440 + I * 480, 480);
+    end;
+    Check(Near(BusSample(M, 0, 0, 0), 0.375, 1E-6) AND B.Active AND Near(B.ActiveGain, 0.5, 0),
+      Format('ActiveGain 0.5 halves the input (%.4f, 0.375), Active stays true', [BusSample(M, 0, 0, 0)]));
   finally
     M.Free;
   end;
