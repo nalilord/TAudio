@@ -24,6 +24,7 @@ source library; it does not require a component package or a particular UI toolk
 | `TAudio.ClockSync` | Locks a capture device clock to the reference clock: drift fit, bounded-ratio resampling, counted resyncs |
 | `TAudio.Mixer` | Timestamp-driven mixer: inputs written at absolute frames, gain/mute/balance, bus masks (tracks), counted gaps and late data |
 | `TAudio.Meter` | Peak, RMS and EBU R128 loudness (momentary, short-term, gated integrated) on BS.1770 K-weighting |
+| `TAudio.Dynamics` | Gain, compressor (soft knee, sidechain) and look-ahead true-peak limiter; filters for mixer inputs or standalone |
 
 ## Capturing and clock drift
 
@@ -59,7 +60,7 @@ while the uncorrected offset drifts by the devices' ppm difference.
 ```pascal
 uses TAudio.Mixer;
 
-// Mixer:=TAudioMixer.Create(48000, 2, 6);    // stereo, six buses (OBS tracks)
+// Mixer:=TAudioMixer.Create(48000, 2, 6);    // stereo, six buses (tracks)
 // Mic:=Mixer.AddInput('Microphone');
 // Mic.GainDb:=-3; Mic.BusMask:=%11;         // tracks 1 and 2
 // capture thread: Mic.Write(Floats, Frames, Channels, StartFrame);
@@ -75,6 +76,31 @@ decides when a range is final. Gain changes ramp over one block. Every input has
 a post-fader meter and every bus a meter (`TAudio.Meter`, EBU R128 loudness, sample
 peak, RMS, clip count). `Tests/AudioMixerSmoke` checks both, including the BS.1770
 filter coefficients and the EBU Tech 3341 reference levels.
+
+### Dynamics
+
+```pascal
+uses TAudio.Dynamics, TAudio.Mixer;
+
+// Ducker:=TAudioCompressor.Create('ducker');
+// Ducker.ThresholdDb:=-30; Ducker.Ratio:=10; Ducker.AttackMs:=5; Ducker.ReleaseMs:=300;
+// Music.AddFilter(Ducker, Mic);           // the mic's signal drives the music's compressor
+// Music.AddFilter(TAudioLimiter.Create);  // -1 dBTP, 1.5 ms look-ahead
+```
+
+Each input runs its filter chain before the fader. A filter can take another
+input as its sidechain: it sees that input's filtered signal before the fader,
+silent while it is muted, and inputs feeding a sidechain are processed first;
+cycles are rejected. The limiter adds latency (77 frames at 48 kHz by default);
+the mixer reads that input ahead by its chain latency, so every input stays
+sample-aligned, and `TAudioMixer.Latency` tells the caller how much more data a
+range needs. Compressor: one-pole attack/release on the peak level, static curve
+in dB with an optional soft knee. Limiter: 4x true-peak detector, sliding
+minimum plus moving average over the look-ahead window, so no sample exceeds the
+ceiling and the gain never steps. `Tests/AudioDynamicsSmoke` (20 checks) measures
+the static curves, timing, ceilings against a 16x reference interpolator, and the
+mixer's alignment and ducking. Cost at 48 kHz stereo (FPC -O2, one core): limiter
+86x real time, compressor 577x.
 
 ## Opening and writing
 

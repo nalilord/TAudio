@@ -14,13 +14,26 @@ unit TAudio.Mixer;
   (how long to wait for late inputs).
 
   Per input: gain (dB or linear, ramped over one Mix block so changes never
-  click), mute, balance, and a bus mask (bit n mixes the input into bus n, like
-  OBS's tracks). Inputs with fewer channels are spread (mono to every channel),
+  click), mute, balance, and a bus mask (bit n mixes the input into bus n).
+  Inputs with fewer channels are spread (mono to every channel),
   inputs with more are truncated to the mixer's channels. A post-fader meter per
   input and a meter per bus (TAudio.Meter) follow every Mix.
 
   No limiting: a bus can exceed full scale; its meter counts the clipped
-  samples. Dynamics (compressor, limiter) belong to the input filter chain.
+  samples. Dynamics (compressor, limiter, gain; TAudio.Dynamics) belong to the
+  input filter chain, which runs before the fader:
+
+    take -> filter 1 .. filter n -> gain, mute, balance -> meter -> buses
+
+  A filter may take another input as its sidechain (ducking): it then sees that
+  input's filtered signal before the fader, silent while that input is muted.
+  Inputs that feed a sidechain are processed first in each block; cycles are
+  rejected. Latency: an input whose chain delays by L frames is read L frames
+  ahead, so its output stays on the timeline and aligned with every other
+  input. A caller mixing [S, S + N) must therefore have data up to
+  S + N + Latency (TAudioMixer.Latency, the largest chain latency).
+  When a chain starts or its latency changes, the frames it skips over are not
+  heard: one gap of the latency (1.6 ms for the default limiter).
 
   Threading: Write is safe from any thread (each input has its own lock);
   parameters may be set from any thread and apply at the next Mix; Mix and the
@@ -34,6 +47,7 @@ uses
   Classes,
   SyncObjs,
   SysUtils,
+  TAudio.Dynamics,
   TAudio.Meter;
 
 const
@@ -79,6 +93,13 @@ type
     FAppliedLeft, FAppliedRight: Double;
     FMeter: TAudioMeter;
     FScratch: TArray<Single>;
+    // Filter chain (owned) and the sidechain input of each filter (or nil).
+    FFilters: TList;
+    FSidechains: TList;
+    // Filtered, pre-fader block for sidechain consumers (silence while muted).
+    FSideOut: TArray<Single>;
+    // Block counter of the last Prepare, so each input is prepared once per Mix.
+    FPreparedBlock: Int64;
     // Counters.
     FFramesWritten: Int64;
     FGapFrames: Int64;
@@ -100,6 +121,11 @@ type
     procedure Store(ASource: PSingle; ASourceChannels: Integer; AFrame: Int64; AFrames: Integer);
     // Takes [AStart, AStart + AFrames) into FScratch (silence where nothing was written).
     procedure Take(AStart: Int64; AFrames: Integer);
+    function GetFilter(AIndex: Integer): TAudioFilter;
+    function GetFilterCount: Integer;
+    function GetSidechain(AIndex: Integer): TAudioMixerInput;
+    function FeedsInto(AInput: TAudioMixerInput): Boolean;
+    function ChainLatency: Integer;
   public
     constructor Create(AMixer: TAudioMixer; const AName: string; ABufferFrames: Integer);
     destructor Destroy; override;
@@ -111,6 +137,16 @@ type
     // One past the newest buffered frame; Low(Int64) before the first write. A caller that mixes
     // without a clock (files, tests) mixes a range once every input has written past it.
     function WrittenUntil: Int64;
+    // Appends AFilter to the chain (the input owns it from now on). ASidechain: another input of
+    // the same mixer whose filtered, pre-fader signal drives the filter, or nil.
+    procedure AddFilter(AFilter: TAudioFilter; ASidechain: TAudioMixerInput = nil);
+    // Removes and frees AFilter.
+    procedure RemoveFilter(AFilter: TAudioFilter);
+    // Delay of the enabled filters, in frames.
+    function Latency: Integer;
+    property FilterCount: Integer read GetFilterCount;
+    property Filters[AIndex: Integer]: TAudioFilter read GetFilter;
+    property Sidechains[AIndex: Integer]: TAudioMixerInput read GetSidechain;
     property Name: string read FName;
     property Gain: Double read GetGain write SetGain;
     property GainDb: Double read GetGainDb write SetGainDb;
@@ -148,12 +184,15 @@ type
     FBusClipped: array of Int64;
     FPosition: Int64;
     FMixedFrames: Int64;
+    // Mix calls so far; marks which inputs are prepared in the current block.
+    FBlock: Int64;
     function GetBusData(ABus: Integer): PSingle;
     function GetBusMeter(ABus: Integer): TAudioMeter;
     function GetBusClipped(ABus: Integer): Int64;
     function GetInput(AIndex: Integer): TAudioMixerInput;
     function GetInputCount: Integer;
     procedure BalanceGains(ABalance: Double; out ALeft, ARight: Double);
+    procedure PrepareInput(AInput: TAudioMixerInput; AStartFrame: Int64; AFrames: Integer; ADepth: Integer);
   public
     // ABufferMs: how far ahead of the mix position an input may write.
     constructor Create(ASampleRate: Integer = 48000; AChannels: Integer = 2; ABusCount: Integer = 6;
@@ -165,6 +204,8 @@ type
     // other; a range before the previous one is rendered from whatever is still buffered.
     procedure Mix(AStartFrame: Int64; AFrames: Integer);
     function BusMeterSnapshot(ABus: Integer): TAudioMeterSnapshot;
+    // The largest filter-chain latency of all inputs, in frames.
+    function Latency: Integer;
     property BalanceLaw: TAudioBalanceLaw read FBalanceLaw write FBalanceLaw;
     property BusCount: Integer read FBusCount;
     // Interleaved output of the last Mix, AFrames * Channels samples.
@@ -217,10 +258,19 @@ begin
   FAppliedLeft:=-1;
   FAppliedRight:=-1;
   FMeter:=TAudioMeter.Create(AMixer.SampleRate, AMixer.Channels);
+  FFilters:=TList.Create;
+  FSidechains:=TList.Create;
+  FPreparedBlock:=-1;
 end;
 
 destructor TAudioMixerInput.Destroy;
+var
+  I: Integer;
 begin
+  for I:=0 to FFilters.Count - 1 do
+    TAudioFilter(FFilters[I]).Free;
+  FFilters.Free;
+  FSidechains.Free;
   FMeter.Free;
   FLock.Free;
   inherited Destroy;
@@ -534,6 +584,120 @@ begin
   inherited Destroy;
 end;
 
+function TAudioMixerInput.GetFilter(AIndex: Integer): TAudioFilter;
+begin
+  Result:=TAudioFilter(FFilters[AIndex]);
+end;
+
+function TAudioMixerInput.GetFilterCount: Integer;
+begin
+  Result:=FFilters.Count;
+end;
+
+function TAudioMixerInput.GetSidechain(AIndex: Integer): TAudioMixerInput;
+begin
+  Result:=TAudioMixerInput(FSidechains[AIndex]);
+end;
+
+// True when this input's signal reaches AInput through sidechains (directly or via others).
+function TAudioMixerInput.FeedsInto(AInput: TAudioMixerInput): Boolean;
+var
+  I: Integer;
+  Side: TAudioMixerInput;
+begin
+  Result:=False;
+  if AInput = nil then
+    Exit;
+  for I:=0 to AInput.FSidechains.Count - 1 do
+  begin
+    Side:=TAudioMixerInput(AInput.FSidechains[I]);
+    if (Side = Self) OR ((Side <> nil) AND FeedsInto(Side)) then
+      Exit(True);
+  end;
+end;
+
+procedure TAudioMixerInput.AddFilter(AFilter: TAudioFilter; ASidechain: TAudioMixerInput);
+begin
+  if AFilter = nil then
+    raise EArgumentException.Create('AddFilter: no filter');
+  FMixer.FInputsLock.Acquire;
+  try
+    if ASidechain <> nil then
+    begin
+      if FMixer.FInputs.IndexOf(ASidechain) < 0 then
+        raise EArgumentException.Create('AddFilter: the sidechain is not an input of this mixer');
+      // ASidechain -> Self must not close a loop: Self may not already feed ASidechain.
+      if (ASidechain = Self) OR FeedsInto(ASidechain) then
+        raise EArgumentException.Create('AddFilter: the sidechain would form a cycle');
+    end;
+    AFilter.Prepare(FMixer.SampleRate, FMixer.Channels);
+    FLock.Acquire;
+    try
+      FFilters.Add(AFilter);
+      FSidechains.Add(ASidechain);
+    finally
+      FLock.Release;
+    end;
+  finally
+    FMixer.FInputsLock.Release;
+  end;
+end;
+
+procedure TAudioMixerInput.RemoveFilter(AFilter: TAudioFilter);
+var
+  I: Integer;
+begin
+  FMixer.FInputsLock.Acquire;
+  try
+    FLock.Acquire;
+    try
+      I:=FFilters.IndexOf(AFilter);
+      if I < 0 then
+        Exit;
+      FFilters.Delete(I);
+      FSidechains.Delete(I);
+    finally
+      FLock.Release;
+    end;
+    AFilter.Free;
+  finally
+    FMixer.FInputsLock.Release;
+  end;
+end;
+
+function TAudioMixerInput.ChainLatency: Integer;
+var
+  I: Integer;
+begin
+  Result:=0;
+  for I:=0 to FFilters.Count - 1 do
+    Inc(Result, TAudioFilter(FFilters[I]).Latency);
+end;
+
+function TAudioMixerInput.Latency: Integer;
+begin
+  FLock.Acquire;
+  try
+    Result:=ChainLatency;
+  finally
+    FLock.Release;
+  end;
+end;
+
+function TAudioMixer.Latency: Integer;
+var
+  I: Integer;
+begin
+  Result:=0;
+  FInputsLock.Acquire;
+  try
+    for I:=0 to FInputs.Count - 1 do
+      Result:=Max(Result, TAudioMixerInput(FInputs[I]).Latency);
+  finally
+    FInputsLock.Release;
+  end;
+end;
+
 function TAudioMixer.AddInput(const AName: string): TAudioMixerInput;
 begin
   Result:=TAudioMixerInput.Create(Self, AName, FBufferFrames);
@@ -546,12 +710,23 @@ begin
 end;
 
 procedure TAudioMixer.RemoveInput(AInput: TAudioMixerInput);
+var
+  I, J: Integer;
+  Other: TAudioMixerInput;
 begin
   FInputsLock.Acquire;
   try
     if FInputs.IndexOf(AInput) >= 0 then
     begin
       FInputs.Delete(FInputs.IndexOf(AInput));
+      // Filters that listened to it lose their sidechain (they then follow their own input).
+      for I:=0 to FInputs.Count - 1 do
+      begin
+        Other:=TAudioMixerInput(FInputs[I]);
+        for J:=0 to Other.FSidechains.Count - 1 do
+          if Other.FSidechains[J] = AInput then
+            Other.FSidechains[J]:=nil;
+      end;
       AInput.Free;
     end;
   finally
@@ -581,6 +756,51 @@ begin
   end;
 end;
 
+// Takes the input's block (read ahead by its chain latency) and runs its filter chain, after
+// preparing every input that feeds one of its sidechains. Called with FInputsLock held.
+procedure TAudioMixer.PrepareInput(AInput: TAudioMixerInput; AStartFrame: Int64; AFrames: Integer; ADepth: Integer);
+var
+  I, N: Integer;
+  Side: TAudioMixerInput;
+  SidePtr: PSingle;
+  Muted: Boolean;
+begin
+  if AInput.FPreparedBlock = FBlock then
+    Exit;
+  // Cycles are rejected in AddFilter; the depth bound only guards against misuse.
+  if ADepth > FInputs.Count then
+    raise Exception.Create('TAudioMixer: sidechain cycle');
+  for I:=0 to AInput.FSidechains.Count - 1 do
+  begin
+    Side:=TAudioMixerInput(AInput.FSidechains[I]);
+    if Side <> nil then
+      PrepareInput(Side, AStartFrame, AFrames, ADepth + 1);
+  end;
+  N:=AFrames * FChannels;
+  AInput.FLock.Acquire;
+  try
+    AInput.Take(AStartFrame + AInput.ChainLatency, AFrames);
+    for I:=0 to AInput.FFilters.Count - 1 do
+    begin
+      Side:=TAudioMixerInput(AInput.FSidechains[I]);
+      SidePtr:=nil;
+      if (Side <> nil) AND (Length(Side.FSideOut) >= N) then
+        SidePtr:=@Side.FSideOut[0];
+      TAudioFilter(AInput.FFilters[I]).Process(@AInput.FScratch[0], AFrames, SidePtr);
+    end;
+    Muted:=AInput.FMuted;
+    if Length(AInput.FSideOut) < N then
+      SetLength(AInput.FSideOut, N);
+    if Muted then
+      FillChar(AInput.FSideOut[0], N * SizeOf(Single), 0)
+    else
+      Move(AInput.FScratch[0], AInput.FSideOut[0], N * SizeOf(Single));
+    AInput.FPreparedBlock:=FBlock;
+  finally
+    AInput.FLock.Release;
+  end;
+end;
+
 procedure TAudioMixer.Mix(AStartFrame: Int64; AFrames: Integer);
 var
   I, B, F, C: Integer;
@@ -600,14 +820,15 @@ begin
     FillChar(FBus[B][0], AFrames * FChannels * SizeOf(Single), 0);
   end;
 
+  Inc(FBlock);
   FInputsLock.Acquire;
   try
     for I:=0 to FInputs.Count - 1 do
     begin
       Input:=TAudioMixerInput(FInputs[I]);
+      PrepareInput(Input, AStartFrame, AFrames, 0);
       Input.FLock.Acquire;
       try
-        Input.Take(AStartFrame, AFrames);
         Gain:=Input.FGain;
         Muted:=Input.FMuted;
         Balance:=Input.FBalance;
