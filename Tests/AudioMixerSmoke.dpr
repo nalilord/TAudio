@@ -11,13 +11,14 @@ program AudioMixerSmoke;
   peak, RMS, and both integrated-loudness gates.
   Mixer: exact sums, gain in dB, mute, bus masks, balance, timeline alignment
   across different chunking, gaps, late and early data, overlaps, mono inputs, a
-  click-free gain change, clipping, and concurrent writers.
+  click-free gain change, clipping, concurrent writers, and Reset: a second
+  run on a used mixer (filters, ramps and meters included) equals a fresh one.
 }
 
 uses
   {$IFDEF UNIX}cthreads,{$ENDIF}
   SysUtils, Classes, Math,
-  TAudio.Meter, TAudio.Mixer;
+  TAudio.Dynamics, TAudio.Meter, TAudio.Mixer;
 
 const
   Fs = 48000;
@@ -404,12 +405,109 @@ begin
   end;
 end;
 
+// Two inputs, a limiter on A (state and look-ahead latency), B at -6 dB on both buses.
+function ResetMixer: TAudioMixer;
+var
+  L: TAudioLimiter;
+begin
+  Result:=TAudioMixer.Create(Fs, 2, 2, 1000);
+  L:=TAudioLimiter.Create('limit');
+  L.CeilingDb:=-3;
+  Result.AddInput('A').AddFilter(L);
+  Result.AddInput('B').GainDb:=-6;
+  Result.Inputs[1].BusMask:=3;
+end;
+
+// Twelve 480-frame blocks from AStart: A a loud 440 Hz sine, B a ramp; bus 0 and 1 captured.
+procedure ResetRun(AMixer: TAudioMixer; AStart: Int64; var AOut: TArray<Single>);
+const
+  Blocks = 12;
+  N = 480;
+var
+  Buf: array of Single;
+  K, I, B, Lat: Integer;
+  F: Int64;
+begin
+  SetLength(Buf, (N + 4800) * 2);
+  SetLength(AOut, Blocks * N * 2 * 2);
+  Lat:=AMixer.Latency;
+  for K:=0 to Blocks - 1 do
+  begin
+    // Write ahead by the chain latency (and one block more) so every mixed range is complete.
+    F:=AStart + Int64(K) * N;
+    for I:=0 to N - 1 do
+    begin
+      Buf[2 * I]:=1.5 * Sin(2 * Pi * 440 * (K * N + I) / Fs);
+      Buf[2 * I + 1]:=Buf[2 * I];
+    end;
+    AMixer.Inputs[0].Write(@Buf[0], N, 2, F + Lat);
+    for I:=0 to N - 1 do
+    begin
+      Buf[2 * I]:=(K * N + I) / (Blocks * N);
+      Buf[2 * I + 1]:=-Buf[2 * I];
+    end;
+    AMixer.Inputs[1].Write(@Buf[0], N, 2, F);
+    AMixer.Mix(F, N);
+    for B:=0 to 1 do
+      Move(AMixer.BusData[B]^, AOut[(B * Blocks + K) * N * 2], N * 2 * SizeOf(Single));
+  end;
+end;
+
+procedure TestReset;
+var
+  Fresh, Used: TAudioMixer;
+  Ref, Got: TArray<Single>;
+  I, Diff: Integer;
+  Late: Int64;
+begin
+  Fresh:=ResetMixer;
+  Used:=ResetMixer;
+  try
+    ResetRun(Fresh, 0, Ref);
+    // A first run far along the timeline, then gain and mute changes that must survive Reset.
+    ResetRun(Used, 96000, Got);
+    Used.Inputs[1].Muted:=True;
+    Used.Inputs[1].Muted:=False;
+    // Without Reset a run from frame 0 is entirely too late for this mixer.
+    WriteConst(Used.Inputs[1], 0, 480, 0.25);
+    Late:=Used.Inputs[1].LateFrames;
+    Check(Late = 480, Format('without Reset a write before the mixed range is late (%d of 480)', [Late]));
+
+    Used.Reset;
+    Check((Used.Position = 0) AND (Used.MixedFrames = 0) AND (Used.BusClippedSamples[0] = 0)
+      AND (Used.Inputs[0].FramesWritten = 0) AND (Used.Inputs[1].LateFrames = 0)
+      AND (Used.Inputs[1].WrittenUntil = Low(Int64)) AND (Used.Inputs[0].FilterCount = 1)
+      AND Near(Used.Inputs[1].GainDb, -6, 1E-9) AND (Used.Inputs[1].BusMask = 3),
+      'Reset clears position, counters and buffers, keeps gain, bus mask and filters');
+    Check(Used.Latency = Fresh.Latency, Format('filter latency kept (%d frames)', [Used.Latency]));
+
+    ResetRun(Used, 0, Got);
+    Diff:=0;
+    for I:=0 to High(Ref) do
+      if Got[I] <> Ref[I] then
+        Inc(Diff);
+    Check(Diff = 0, Format('second run after Reset equals a fresh mixer sample for sample (%d of %d differ)',
+      [Diff, Length(Ref)]));
+    Check((Used.Inputs[0].UnderrunFrames = Fresh.Inputs[0].UnderrunFrames)
+      AND (Used.Inputs[1].GapFrames = Fresh.Inputs[1].GapFrames)
+      AND (Used.BusClippedSamples[0] = Fresh.BusClippedSamples[0])
+      AND Near(Used.BusMeter[0].PeakDb[0], Fresh.BusMeter[0].PeakDb[0], 1E-9)
+      AND Near(Used.Inputs[0].Meter.PeakDb[0], Fresh.Inputs[0].Meter.PeakDb[0], 1E-9),
+      Format('counters and meters after Reset match a fresh mixer (underruns %d, bus peak %.2f dBFS)',
+        [Used.Inputs[0].UnderrunFrames, Used.BusMeter[0].PeakDb[0]]));
+  finally
+    Used.Free;
+    Fresh.Free;
+  end;
+end;
+
 begin
   try
     TestMeter;
     TestMixer;
     TestActiveGate;
     TestThreads;
+    TestReset;
   except
     on E: Exception do
       Check(False, 'unexpected ' + E.ClassName + ': ' + E.Message);

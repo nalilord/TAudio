@@ -139,6 +139,10 @@ type
     // A copy of the post-fader meter, safe from any thread.
     function MeterSnapshot: TAudioMeterSnapshot;
     procedure ResetCounters;
+    // Forgets the timeline: buffered samples, the mixed position, the gain ramp, filter state, the
+    // meter and the counters. Parameters, filters and sidechains are kept. TAudioMixer.Reset
+    // resets every input; call this alone only for an input that restarts on its own timeline.
+    procedure Reset;
     // One past the newest buffered frame; Low(Int64) before the first write. A caller that mixes
     // without a clock (files, tests) mixes a range once every input has written past it.
     function WrittenUntil: Int64;
@@ -216,6 +220,11 @@ type
     // Renders [AStartFrame, AStartFrame + AFrames) into every bus. Ranges normally follow each
     // other; a range before the previous one is rendered from whatever is still buffered.
     procedure Mix(AStartFrame: Int64; AFrames: Integer);
+    // Starts a new run: every input forgets its timeline (TAudioMixerInput.Reset), Position,
+    // MixedFrames, bus meters and clip counts return to zero. The next Write may use any frame
+    // position, earlier ones included. Inputs, parameters and filter chains are kept. Call it
+    // from the mixing thread while no Write is in progress for the old run.
+    procedure Reset;
     function BusMeterSnapshot(ABus: Integer): TAudioMeterSnapshot;
     // The largest filter-chain latency of all inputs, in frames.
     function Latency: Integer;
@@ -594,6 +603,36 @@ begin
   end;
 end;
 
+procedure TAudioMixerInput.Reset;
+var
+  I: Integer;
+begin
+  FLock.Acquire;
+  try
+    FHasData:=False;
+    FStartFrame:=0;
+    FEndFrame:=0;
+    FMixedUntil:=0;
+    FMixStarted:=False;
+    FAppliedLeft:=-1;
+    FAppliedRight:=-1;
+    FPreparedBlock:=-1;
+    if Length(FSideOut) > 0 then
+      FillChar(FSideOut[0], Length(FSideOut) * SizeOf(Single), 0);
+    for I:=0 to FFilters.Count - 1 do
+      TAudioFilter(FFilters[I]).Reset;
+    FMeter.Reset;
+    FFramesWritten:=0;
+    FGapFrames:=0;
+    FLateFrames:=0;
+    FOverflowFrames:=0;
+    FOverlapFrames:=0;
+    FUnderrunFrames:=0;
+  finally
+    FLock.Release;
+  end;
+end;
+
 { TAudioMixer }
 
 constructor TAudioMixer.Create(ASampleRate, AChannels, ABusCount, ABufferMs: Integer);
@@ -947,6 +986,33 @@ begin
   end;
   FPosition:=AStartFrame + AFrames;
   Inc(FMixedFrames, AFrames);
+end;
+
+procedure TAudioMixer.Reset;
+var
+  I, B: Integer;
+begin
+  FInputsLock.Acquire;
+  try
+    for I:=0 to FInputs.Count - 1 do
+      TAudioMixerInput(FInputs[I]).Reset;
+  finally
+    FInputsLock.Release;
+  end;
+  FBusMeterLock.Acquire;
+  try
+    for B:=0 to FBusCount - 1 do
+    begin
+      FBusMeters[B].Reset;
+      FBusClipped[B]:=0;
+      if Length(FBus[B]) > 0 then
+        FillChar(FBus[B][0], Length(FBus[B]) * SizeOf(Single), 0);
+    end;
+  finally
+    FBusMeterLock.Release;
+  end;
+  FPosition:=0;
+  FMixedFrames:=0;
 end;
 
 function TAudioMixer.BusMeterSnapshot(ABus: Integer): TAudioMeterSnapshot;
